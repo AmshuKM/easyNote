@@ -173,17 +173,34 @@ await check('variables carry to later lines', async () => {
   await page.context().close();
 });
 
-await check('a function line offers a graph in a floating window', async () => {
+await check('a graph appears beside an equation as soon as it is written', async () => {
   const page = await newPage();
   await page.click('[data-mode=math]');
   await write(page, 'y=2x+1', 300, 260, 44, 7);
-  await page.waitForTimeout(1800);
-  await page.waitForSelector('.graph-chip', { timeout: 3000 });
-  await page.click('.graph-chip');
+  await page.waitForSelector('.inline-graph', { timeout: 4000 });
+  const title = await page.textContent('.inline-graph .ig-title');
+  assert(title.includes('y = 2x+1'), `title: ${title}`);
+  // it sits to the right of the equation
+  const card = await page.locator('.inline-graph').boundingBox();
+  const lineRight = await page.evaluate(() => {
+    const f = window.__easyNote.app.functions[0];
+    const v = window.__easyNote.app.view;
+    return (f.line.maxX - v.x) * v.s;
+  });
+  const o = await canvasOrigin(page);
+  assert(card.x - o.x > lineRight, `card at ${card.x - o.x}, line ends ${lineRight}`);
+  // the curve is drawn on the card
+  const inked = await page.evaluate(() => {
+    const c = document.querySelector('.inline-graph canvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 120 && d[i + 1] < 190 && d[i + 2] < 80) n++;
+    return n;
+  });
+  assert(inked > 100, `curve pixels ${inked}`);
+  // expand opens the big floating graph window, which can be dragged
+  await page.click('.inline-graph [data-act=expand]');
   assert(await page.isVisible('.graph-window'), 'graph window hidden');
-  const label = await page.textContent('.graph-legend');
-  assert(label.includes('y = 2x+1'), `legend: ${label}`);
-  // drag the window by its header
   const box = await page.locator('.graph-head').boundingBox();
   await page.mouse.move(box.x + 40, box.y + 10);
   await page.mouse.down();
@@ -191,7 +208,31 @@ await check('a function line offers a graph in a floating window', async () => {
   await page.mouse.up();
   const moved = await page.locator('.graph-head').boundingBox();
   assert(Math.abs(moved.x - (box.x - 240)) < 3, 'window did not move');
+  // closing the card leaves a chip that brings it back
+  await page.click('.graph-window [data-act=close]');
+  await page.click('.inline-graph [data-act=hide]');
+  await page.waitForSelector('.graph-chip');
+  assert(await page.locator('.inline-graph').count() === 0, 'card still shown');
+  await page.click('.graph-chip');
+  await page.waitForSelector('.inline-graph');
   await shot(page, '05-graph');
+  await page.context().close();
+});
+
+await check('several equations each get their own graph, without overlapping', async () => {
+  const page = await newPage();
+  await page.click('[data-mode=math]');
+  await write(page, 'y=2x+1', 200, 200, 40, 31);
+  await write(page, 'y=x^2', 200, 270, 40, 32);
+  await write(page, 'y=3x', 200, 340, 40, 33);
+  await page.waitForTimeout(1500);
+  await page.waitForFunction(() => document.querySelectorAll('.inline-graph').length === 3, null, { timeout: 4000 });
+  const boxes = await page.locator('.inline-graph').evaluateAll((els) => els.map((e) => e.getBoundingClientRect()).map((r) => ({ top: r.top, bottom: r.bottom, left: r.left })));
+  boxes.sort((a, b) => a.top - b.top);
+  for (let i = 1; i < boxes.length; i++) assert(boxes[i].top >= boxes[i - 1].bottom, 'graphs overlap');
+  const titles = await page.locator('.inline-graph .ig-title').allTextContents();
+  assert(titles.some((t) => t.includes('x²')), `titles ${titles}`);
+  await shot(page, '05c-many-graphs');
   await page.context().close();
 });
 
@@ -235,9 +276,9 @@ await check('graphing y = x² written with a raised exponent', async () => {
   await page.click('[data-mode=math]');
   await draw(page, handwriteText('y=x', { x: 300, y: 300, h: 44, seed: 21, noise: 1.3 }));
   await draw(page, handwriteText('2', { x: 412, y: 284, h: 24, seed: 22, noise: 1.3 }));
-  await page.waitForTimeout(1500);
-  await page.waitForSelector('.graph-chip', { timeout: 3000 });
-  await page.click('.graph-chip');
+  // the card appears as soon as "y=x" is read, then updates when the exponent is
+  await page.waitForFunction(() => document.querySelector('.inline-graph .ig-title')?.textContent.includes('x²'), null, { timeout: 5000 });
+  await page.click('.inline-graph [data-act=expand]');
   const legend = await page.textContent('.graph-legend');
   assert(legend.includes('x²'), `legend: ${legend}`);
   const ys = await page.evaluate(() => {
@@ -260,6 +301,8 @@ await check('graphing y = x² written with a raised exponent', async () => {
   await page.waitForTimeout(1500);
   const y0 = await page.evaluate(() => { const g = window.__easyNote.graph; return g.fnFor(g.functions[0])(0); });
   assert(y0 === 1, `after edit y(0) = ${y0}`);
+  const t = await page.textContent('.inline-graph .ig-title');
+  assert(t.includes('x²+1'), `inline title after edit: ${t}`);
   await shot(page, '05b-graph-parabola');
   await page.context().close();
 });

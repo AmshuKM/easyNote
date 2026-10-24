@@ -109,27 +109,9 @@ export class GraphWindow {
     }
   }
 
-  // Frame the first visible function: keep x ≈ -5…5 and fit the bulk of its
-  // values vertically, preferring to keep the x-axis in view.
   fit() {
-    const h = this.canvas.clientHeight || 260;
-    this.view = { cx: 0, cy: 0, scale: 40 };
     const f = this.functions.find((fn) => !this.hidden.has(fn.key));
-    if (!f) return;
-    const fn = this.fnFor(f);
-    const ys = [];
-    for (let x = -5; x <= 5; x += 0.05) {
-      const y = fn(x);
-      if (Number.isFinite(y)) ys.push(y);
-    }
-    if (!ys.length) return;
-    ys.sort((a, b) => a - b);
-    const lo = ys[Math.floor(ys.length * 0.05)], hi = ys[Math.floor(ys.length * 0.95)];
-    const span = Math.max(hi - lo, 1e-9) * 1.25;
-    this.view.scale = Math.min(40, Math.max(6, h / span));
-    const viewH = h / this.view.scale;
-    const mid = (lo + hi) / 2;
-    this.view.cy = Math.abs(mid) + viewH * 0.1 < viewH / 2 ? 0 : mid;
+    this.view = f ? fitView(this.fnFor(f), this.canvas.clientHeight || 260, this.canvas.clientWidth || 400, 10) : { cx: 0, cy: 0, scale: 40 };
   }
 
   fnFor(f) {
@@ -226,67 +208,15 @@ export class GraphWindow {
     const ctx = this.ctx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const css = getComputedStyle(this.el);
-    const fg = css.getPropertyValue('--text').trim() || '#222';
-    const grid = css.getPropertyValue('--grid').trim() || '#ddd';
-    ctx.clearRect(0, 0, w, h);
+    const curves = this.functions.filter((f) => !this.hidden.has(f.key)).map((f) => ({ fn: this.fnFor(f), color: f.color, label: f.label }));
+    const traced = plotGraph(ctx, w, h, this.view, curves, {
+      fg: css.getPropertyValue('--text').trim() || '#222',
+      grid: css.getPropertyValue('--grid').trim() || '#ddd',
+      traceAt: this.traceAt,
+    });
     const { cx, cy, scale } = this.view;
     const toX = (x) => w / 2 + (x - cx) * scale;
     const toY = (y) => h / 2 - (y - cy) * scale;
-    const step = niceStep(80 / scale);
-    ctx.lineWidth = 1;
-    ctx.font = '11px system-ui, sans-serif';
-    ctx.strokeStyle = grid;
-    ctx.fillStyle = fg;
-    const x0 = cx - w / 2 / scale, x1 = cx + w / 2 / scale;
-    const y0 = cy - h / 2 / scale, y1 = cy + h / 2 / scale;
-    ctx.beginPath();
-    for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { ctx.moveTo(toX(x), 0); ctx.lineTo(toX(x), h); }
-    for (let y = Math.ceil(y0 / step) * step; y <= y1; y += step) { ctx.moveTo(0, toY(y)); ctx.lineTo(w, toY(y)); }
-    ctx.stroke();
-    // axes
-    ctx.strokeStyle = fg;
-    ctx.globalAlpha = 0.6;
-    ctx.beginPath();
-    ctx.moveTo(0, toY(0)); ctx.lineTo(w, toY(0));
-    ctx.moveTo(toX(0), 0); ctx.lineTo(toX(0), h);
-    ctx.stroke();
-    ctx.globalAlpha = 0.75;
-    const ay = Math.min(Math.max(toY(0) + 13, 12), h - 4);
-    const ax = Math.min(Math.max(toX(0) + 4, 4), w - 30);
-    for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) {
-      if (Math.abs(x) < step / 2) continue;
-      ctx.fillText(formatNumber(+x.toPrecision(10)), toX(x) + 2, ay);
-    }
-    for (let y = Math.ceil(y0 / step) * step; y <= y1; y += step) {
-      if (Math.abs(y) < step / 2) continue;
-      ctx.fillText(formatNumber(+y.toPrecision(10)), ax, toY(y) - 2);
-    }
-    ctx.globalAlpha = 1;
-    // curves
-    let traced = null;
-    for (const f of this.functions) {
-      if (this.hidden.has(f.key)) continue;
-      const fn = this.fnFor(f);
-      ctx.strokeStyle = f.color;
-      ctx.lineWidth = 2.5;
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      let pen = false, prevY = null;
-      for (let px = 0; px <= w; px += 1) {
-        const x = cx + (px - w / 2) / scale;
-        const y = fn(x);
-        const sy = toY(y);
-        if (!Number.isFinite(y) || Math.abs(sy) > 1e5 || (prevY !== null && Math.abs(sy - prevY) > h * 2)) { pen = false; prevY = null; continue; }
-        if (pen) ctx.lineTo(px, sy); else { ctx.moveTo(px, sy); pen = true; }
-        prevY = sy;
-      }
-      ctx.stroke();
-      if (this.traceAt != null && !traced) {
-        const x = cx + (this.traceAt - w / 2) / scale;
-        const y = fn(x);
-        if (Number.isFinite(y)) traced = { x, y, color: f.color, label: f.label };
-      }
-    }
     if (traced) {
       ctx.fillStyle = traced.color;
       ctx.beginPath();
@@ -304,6 +234,97 @@ export function prettyMath(s) {
     .replace(/\^\(([0-9xn-]+)\)|\^([0-9])/g, (m, a, b) => [...(a ?? b)].map((c) => SUP[c]).join(''))
     .replace(/\*/g, '·')
     .replace(/=/g, ' = ');
+}
+
+// Frame a function for a w×h (px) plot: about -halfWidth…halfWidth across,
+// zoomed out vertically (up to 2×) to show more of the curve, and centred on
+// where it crosses x = 0 (or its lowest/highest part when that is off-screen).
+export function fitView(fn, h, w = h * 1.6, halfWidth = 5) {
+  const ys = [];
+  for (let x = -halfWidth; x <= halfWidth; x += halfWidth / 100) {
+    const y = fn(x);
+    if (Number.isFinite(y)) ys.push(y);
+  }
+  const scaleX = w / (2 * halfWidth);
+  if (!ys.length) return { cx: 0, cy: 0, scale: scaleX };
+  ys.sort((p, q) => p - q);
+  const lo = ys[Math.floor(ys.length * 0.05)], hi = ys[Math.floor(ys.length * 0.95)];
+  const scaleY = h / (Math.max(hi - lo, 1e-9) * 1.2);
+  const scale = Math.min(scaleX * 2, Math.max(scaleY, scaleX / 2));
+  const viewH = h / scale;
+  let cy;
+  if (hi - lo < viewH * 0.8) cy = (lo + hi) / 2;
+  else {
+    const y0 = fn(0);
+    cy = Number.isFinite(y0) ? y0 : (lo + hi) / 2;
+    cy = Math.min(Math.max(cy, lo + viewH * 0.4), hi - viewH * 0.4);
+  }
+  // keep the x-axis in view when it is nearly in view anyway
+  if (Math.abs(cy) < viewH * 0.45) cy = Math.abs(cy) < viewH * 0.2 ? 0 : cy;
+  return { cx: 0, cy, scale };
+}
+
+// Draw grid, axes, labels and curves into a 2D context of css size w×h.
+// curves: [{fn, color}]. Returns the traced point at pixel column traceAt, if any.
+export function plotGraph(ctx, w, h, view, curves, { fg = '#222', grid = '#ddd', traceAt = null, lineWidth = 2.5, labels = true } = {}) {
+  ctx.clearRect(0, 0, w, h);
+  const { cx, cy, scale } = view;
+  const toX = (x) => w / 2 + (x - cx) * scale;
+  const toY = (y) => h / 2 - (y - cy) * scale;
+  const step = niceStep(Math.max(60, Math.min(w, h) / 4) / scale);
+  ctx.lineWidth = 1;
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.strokeStyle = grid;
+  ctx.fillStyle = fg;
+  const x0 = cx - w / 2 / scale, x1 = cx + w / 2 / scale;
+  const y0 = cy - h / 2 / scale, y1 = cy + h / 2 / scale;
+  ctx.beginPath();
+  for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { ctx.moveTo(toX(x), 0); ctx.lineTo(toX(x), h); }
+  for (let y = Math.ceil(y0 / step) * step; y <= y1; y += step) { ctx.moveTo(0, toY(y)); ctx.lineTo(w, toY(y)); }
+  ctx.stroke();
+  ctx.strokeStyle = fg;
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(0, toY(0)); ctx.lineTo(w, toY(0));
+  ctx.moveTo(toX(0), 0); ctx.lineTo(toX(0), h);
+  ctx.stroke();
+  if (labels) {
+    ctx.globalAlpha = 0.75;
+    const ay = Math.min(Math.max(toY(0) + 13, 12), h - 4);
+    const ax = Math.min(Math.max(toX(0) + 4, 4), w - 30);
+    for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) {
+      if (Math.abs(x) < step / 2 || toX(x) < 6 || toX(x) > w - 22) continue; // skip zero and clipped labels
+      ctx.fillText(formatNumber(+x.toPrecision(10)), toX(x) + 2, ay);
+    }
+    for (let y = Math.ceil(y0 / step) * step; y <= y1; y += step) {
+      if (Math.abs(y) < step / 2 || toY(y) < 14 || toY(y) > h - 4) continue;
+      ctx.fillText(formatNumber(+y.toPrecision(10)), ax, toY(y) - 2);
+    }
+  }
+  ctx.globalAlpha = 1;
+  let traced = null;
+  for (const c of curves) {
+    ctx.strokeStyle = c.color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    let pen = false, prevY = null;
+    for (let px = 0; px <= w; px += 1) {
+      const x = cx + (px - w / 2) / scale;
+      const y = c.fn(x);
+      const sy = toY(y);
+      if (!Number.isFinite(y) || Math.abs(sy) > 1e5 || (prevY !== null && Math.abs(sy - prevY) > h * 2)) { pen = false; prevY = null; continue; }
+      if (pen) ctx.lineTo(px, sy); else { ctx.moveTo(px, sy); pen = true; }
+      prevY = sy;
+    }
+    ctx.stroke();
+    if (traceAt != null && !traced) {
+      const x = cx + (traceAt - w / 2) / scale;
+      const y = c.fn(x);
+      if (Number.isFinite(y)) traced = { x, y, color: c.color, label: c.label };
+    }
+  }
+  return traced;
 }
 
 function niceStep(raw) {

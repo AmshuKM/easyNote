@@ -7,7 +7,7 @@ An intelligent whiteboard and note-taking app for the browser, inspired by the i
 - **Solves handwritten math in your handwriting.** In **Math** mode, write `12 × 3 =` and the answer appears after the `=` in your own writing. It learns how you write each digit.
   - Variables: write `a = 5` and later lines can use `a` (`3a + 1 =` → `16`).
   - Powers (write the exponent raised, like `x²`, or use `^`), brackets, `÷ / × *`, decimals, `!`, `%`, `π`, `√`, `sin cos tan log ln sqrt abs exp`.
-  - Graphs: write `y = 2x + 1` or `f(x) = x^2` and tap **Graph** to open a floating, draggable, resizable graph window with pan/zoom, a live trace readout and sliders for any variables the function uses.
+  - Graphs: write `y = 2x + 1`, `y = 3x²` or `f(x) = …` and a live graph appears right beside it — one per equation, lined up in a column when you stack equations (below the equation on narrow phone screens). Graphs never block your pen: keep writing straight through them. Tap ⤢ for a larger floating, draggable window with pan/zoom, a live trace readout and sliders for any variables the function uses; ✕ hides a graph and leaves a small **Graph** chip to bring it back.
 - **Infinite canvas** with pan and zoom (scroll / trackpad pinch / two-finger touch), lasso select (move, duplicate, recolor, tidy, delete), eraser, highlighter, colors and pen sizes, and full undo/redo.
 - **Notes are saved automatically** in your browser (multiple notes in the sidebar), and you can **export PNG or PDF**.
 - **Light and dark mode**, phone, tablet and desktop layouts.
@@ -34,7 +34,7 @@ Or open it on GitHub Pages: the included workflow (`.github/workflows/pages.yml`
 | Zoom | `Ctrl/Cmd` + scroll, trackpad/touch pinch, `Ctrl/Cmd +` / `-`, `Ctrl/Cmd+0` to fit |
 | Tools | `P` pen, `H` highlighter, `E` eraser, `L` lasso, `M` toggles Notes/Math |
 | Selection | Lasso strokes, drag to move, then Duplicate / Tidy / Delete, or pick a color to recolor |
-| Graph | Tap the **Graph** chip next to a `y = …` line, or the graph button in the toolbar |
+| Graph | Appears by itself beside every `y = …` / `f(x) = …`; ⤢ enlarges it, ✕ hides it. The toolbar graph button shows all equations together |
 
 With a stylus, fingers pan and zoom while the pen draws (simple palm rejection).
 
@@ -53,7 +53,8 @@ Settings (**⋯ → Settings**) let you toggle Smart Script, automatic shape cor
 | `js/beautify.js` | Smart Script: deskew, baseline, size and spacing normalisation, smoothing |
 | `js/mathparse.js` | Tokenizer, parser and evaluator with implicit multiplication, functions, variables |
 | `js/handwriting.js` | Writes answers using your own digit samples, with natural variation |
-| `js/graph.js` | Floating graph window |
+| `js/inlinegraph.js` | Graph cards pinned beside each equation |
+| `js/graph.js` | Shared plotting, and the floating graph window |
 | `js/claude.js` | Optional Claude vision transcription (uses the official SDK, vendored in `vendor/`) |
 | `js/storage.js`, `js/export.js` | localStorage persistence; PNG and a dependency-free PDF writer |
 
@@ -83,7 +84,7 @@ Your notes never leave your browser. If you turn on Claude recognition, an image
 
 ## Limitations
 
-- Offline recognition handles digits, operators and the variables `x y a b c n` best, including digits written joined-up. Very unusual shapes can still be misread (for example an `8` with an open top can read as `9`). Turn on **Show recognized text** in Settings to see what was read, or Claude recognition for messier writing.
+- Offline recognition handles digits, operators and the variables `x y a b c n` best, including digits written joined-up, a cursive `x` and a looped `y`. Very unusual shapes can still be misread (for example an `8` with an open top can read as `9`). Turn on **Show recognized text** in Settings to see what was read, or Claude recognition for messier writing.
 - Fractions written as a stacked bar, and radicals spanning an expression, are not parsed offline. Write `(a+b)/c` and `sqrt(…)` instead, or use Claude recognition.
 - Notes are stored per browser. Export PNG/PDF to keep copies.
 

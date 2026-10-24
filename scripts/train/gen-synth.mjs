@@ -14,7 +14,22 @@ mkdirSync(out, { recursive: true });
 
 // Extra hand-style variants beyond the recognizer templates.
 const EXTRA = {
-  x: ['M6 52 C20 70 36 84 50 100|M50 52 C36 70 20 84 6 100', 'M6 56 C20 50 34 100 50 96|M50 52 C40 60 18 90 6 100'],
+  x: [
+    'M6 52 C20 70 36 84 50 100|M50 52 C36 70 20 84 6 100', 'M6 56 C20 50 34 100 50 96|M50 52 C40 60 18 90 6 100',
+    // cursive x written as two back-to-back curves "ɔc"
+    'M4 56 C24 46 36 64 30 76 C26 88 14 100 4 96|M56 56 C36 46 26 64 30 76 C34 90 44 100 58 94',
+    'M2 54 C20 48 30 62 28 76 C26 90 16 98 6 98|M54 52 C38 50 30 62 30 76 C30 92 42 100 56 96',
+    // ...or in one stroke, with or without a small loop in the middle
+    'M4 54 C24 46 34 66 28 78 C22 92 8 100 4 92 M56 54 C38 48 26 66 32 80 C38 94 50 100 58 92',
+    'M6 56 C26 48 32 70 30 76 C28 84 22 86 24 78 C28 64 44 54 56 56 M30 76 C32 90 44 100 58 94',
+    'M4 54 C22 50 30 64 30 76 C30 90 18 100 6 98|M58 54 C44 52 34 60 31 72 M31 80 C34 92 46 100 58 94',
+  ],
+  // y with a looped tail
+  y: [
+    'M5 50 C14 64 22 84 28 100|M50 50 C40 90 34 128 22 144 C10 156 2 136 16 126 C26 118 36 112 46 106',
+    'M4 52 C4 78 12 96 26 96 C40 96 46 80 46 50 C46 90 44 120 30 142 C18 156 4 140 18 126 C28 116 40 110 50 106',
+    'M2 56 C14 52 26 70 30 96|M52 50 C44 76 36 110 24 140 C14 158 0 146 10 132 C18 122 34 116 48 112',
+  ],
   '*': ['M30 20 L30 80|M4 50 L56 50|M10 28 L50 72|M50 28 L10 72'],
   '÷': ['M0 50 L60 50|D30 22', 'M0 50 L60 50|D30 22|D30 78'],
   '=': ['M0 40 L60 38|M2 62 L58 64'],
@@ -28,7 +43,9 @@ const EXTRA = {
   '^': ['M8 56 L30 10 L52 56'],
 };
 
-const variantsOf = (ch) => [...(GLYPHS[ch === 'x' ? 'x' : ch] || []), ...(EXTRA[ch] || []), ...(ch === 'x' ? GLYPHS['×'] : [])];
+// Classes with extra hand-styles get them weighted in (listed twice) so common
+// personal forms like a cursive x are well represented.
+const variantsOf = (ch) => [...(GLYPHS[ch] || []), ...(EXTRA[ch] || []), ...(EXTRA[ch] || []), ...(ch === 'x' ? GLYPHS['×'] : [])];
 
 function distort(strokes, rnd) {
   const all = strokes.flat();

@@ -107,7 +107,52 @@ export function groupLines(strokes, refH = lineHeightEstimate(strokes)) {
     }
   }
   lines = lines.filter((l) => l.strokes.length);
+  rehomeExponents(lines, refH);
+  lines = lines.filter((l) => l.strokes.length);
   return lines.sort((a, b) => a.box.minY - b.box.minY || a.box.minX - b.box.minX);
+}
+
+// When lines are written close together, an exponent can end up grouped with
+// the line above or below it. A small mark that sits off its own line's row but
+// fits neatly at the top-right of a character on another line moves there.
+function rehomeExponents(lines, refH) {
+  const rowOf = (l) => {
+    const big = l.strokes.filter((s) => strokeBox(s).h > 0.4 * refH);
+    const ref = big.length ? big : l.strokes;
+    return { cy: median(ref.map((s) => { const b = strokeBox(s); return (b.minY + b.maxY) / 2; })), h: median(ref.map((s) => strokeBox(s).h)) };
+  };
+  // distance from the mark's bottom-left to the top-right of a base character
+  const fit = (b, line) => {
+    let best = Infinity;
+    for (const t of line.strokes) {
+      const tb = strokeBox(t);
+      if (tb === b || tb.h < 0.4 * refH) continue;
+      if (b.maxY > tb.minY + 0.6 * tb.h || b.minX < tb.minX + 0.3 * tb.w) continue;
+      best = Math.min(best, Math.hypot(b.minX - tb.maxX, b.maxY - tb.minY));
+    }
+    return best;
+  };
+  for (const L of lines) {
+    if (L.strokes.length < 3) continue;
+    const row = rowOf(L);
+    for (const s of [...L.strokes]) {
+      const b = strokeBox(s);
+      if (b.h > 0.7 * refH || Math.max(b.w, b.h) < 0.2 * refH) continue; // not exponent-sized
+      if (Math.abs((b.minY + b.maxY) / 2 - row.cy) < 0.45 * row.h) continue; // sits on its row
+      const here = fit(b, L);
+      let target = null, bestD = Math.min(here, 0.7 * refH);
+      for (const M of lines) {
+        if (M === L || M.strokes.length < 2) continue;
+        const d = fit(b, M);
+        if (d < bestD) { bestD = d; target = M; }
+      }
+      if (target) {
+        L.strokes.splice(L.strokes.indexOf(s), 1);
+        target.strokes.push(s);
+      }
+    }
+  }
+  for (const l of lines) if (l.strokes.length) l.box = unionBox(l.strokes.map(strokeBox));
 }
 
 // Split a line into character groups by horizontal overlap.
@@ -249,6 +294,7 @@ function ruleBased(group, lineH, mode) {
       const B = boxes[bar];
       const dots = boxes.filter((_, i) => i !== bar);
       const ok = dots.every((d) => Math.max(d.w, d.h) < 0.3 * lineH && Math.max(d.w, d.h) < 0.6 * B.w
+        && Math.max(d.w, d.h) < 2.5 * Math.max(Math.min(d.w, d.h), 0.04 * lineH) // round, not a short bar
         && (d.minX + d.maxX) / 2 > B.minX && (d.minX + d.maxX) / 2 < B.maxX
         && (d.maxY < B.minY || d.minY > B.maxY));
       if (ok) return '÷';
@@ -363,6 +409,7 @@ function readLineCore(strokes, recognizer, mode, cache, classifier) {
     g.ch = mode === 'math' ? (res.rule ?? (res.source === 'cnn' ? pickMathCnn(res.cands) : pickMath(res.cands))) : res.cands[0].ch;
   }
   if (mode === 'math' && classifier) {
+    groups = mergeByRecognition(groups, lineH, classifier, cache);
     groups = splitJoined(groups, lineH, classifier, cache);
     for (const g of groups) if (!g.rule && (g.ch === '1' || g.ch === '/')) g.ch = slashOrOne(g);
   }
@@ -388,6 +435,40 @@ function answerAnchor(groups, lineH) {
   return { x: eq.box.maxX + capH * 0.35, y: baseline, capH, angle: 0 };
 }
 
+// ── characters drawn in separate pieces ──
+// A cursive x is often two curves that don't quite touch ("ɔ c"). When two
+// neighbouring pieces read much better together as one multi-stroke character
+// than apart, join them.
+const MULTI = 'x+4=÷k';
+function mergeByRecognition(groups, lineH, classifier, cache) {
+  const cost = (g) => {
+    const best = g.cands.find((c) => c.ch !== REJECT);
+    return best ? best.dist + (MATH_OK.includes(best.ch) || best.ch === 'x' ? 0 : COMMON_VARS.includes(best.ch) ? 1.2 : 3) : 9;
+  };
+  const out = [];
+  for (let i = 0; i < groups.length; i++) {
+    const a = groups[i], b = groups[i + 1];
+    if (b && !a.rule && !b.rule) {
+      const gap = b.box.minX - a.box.maxX;
+      const box = unionBox([a.box, b.box]);
+      if (gap < 0.3 * lineH && box.w < 1.3 * Math.max(box.h, 0.6 * lineH)) {
+        const strokes = [...a.strokes, ...b.strokes];
+        const key = 'merge:' + strokes.map((st) => st.id + ':' + st.points.length).join(',');
+        let cands = cache?.get(key);
+        if (!cands) { cands = classifier.classify(strokes.map((st) => st.points)).slice(0, 12); cache?.set(key, cands); }
+        const top = cands[0];
+        if (MULTI.includes(top.ch) && top.p > 0.85 && top.dist + 1.5 < cost(a) + cost(b)) {
+          out.push({ strokes, box, cands, source: 'cnn', ch: top.ch });
+          i++;
+          continue;
+        }
+      }
+    }
+    out.push(a);
+  }
+  return out;
+}
+
 // ── joined-up characters ──
 // A blob much wider than it is tall is usually several characters written
 // without lifting the pen ("200"). Try cutting it at different x positions and
@@ -399,7 +480,11 @@ function splitJoined(groups, lineH, classifier, cache) {
   const out = [];
   for (const g of groups) {
     const { w, h } = g.box;
-    if (g.rule || w < 1.1 * lineH || h < 0.35 * lineH || w < 1.25 * h) { out.push(g); continue; }
+    // Wide blobs are often joined-up characters; so are blobs the network can't
+    // place (an x written in one stroke with its exponent).
+    const sure = (g.cands.find((c) => c.ch !== REJECT)?.p ?? 1) > 0.6;
+    const wide = w >= 1.1 * lineH && w >= 1.25 * h;
+    if (g.rule || h < 0.35 * lineH || !(wide || (!sure && w > 0.8 * lineH))) { out.push(g); continue; }
     const key = 'split:' + g.strokes.map((s) => s.id + ':' + s.points.length).join(',');
     let parts = cache?.get(key);
     if (!parts) {
@@ -559,6 +644,17 @@ function extraCost(g, ch) {
 //   "4=2x+1"  → "y=2x+1"   (a lone symbol before "=" with x on the right is y)
 //   "√(x)=x²" → "f(x)=x²"  (a letter before "(x)=" names a function)
 function applyGrammar(groups) {
+  // An unmatched bracket is far more likely a curved "1" (or a "/").
+  let depth = 0;
+  const opens = [];
+  for (const g of groups) {
+    if (g.ch === '(') { depth++; opens.push(g); }
+    else if (g.ch === ')') {
+      if (depth > 0) { depth--; opens.pop(); }
+      else if (extraCost(g, '1') < 5) g.ch = '1';
+    }
+  }
+  for (const g of opens) if (g === groups[groups.length - 1] || !groups.some((h) => h.ch === ')')) { if (extraCost(g, '1') < 5) g.ch = '1'; }
   const chars = groups.map((g) => g.ch);
   const eq = chars.indexOf('=');
   if (eq === 1 && chars.slice(2).includes('x') && groups[0].ch !== 'y' && extraCost(groups[0], 'y') < 6) {

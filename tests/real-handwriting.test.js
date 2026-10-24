@@ -32,3 +32,13 @@ test('the network classifies MNIST-style digits from strokes', () => {
   assert.equal(model.classify(seven)[0].ch, '7');
   assert.equal(model.classify(zero)[0].ch, '0');
 });
+
+test('reads a real user\'s graph equations (cursive x, looped y, joined x²)', () => {
+  const rec = new Recognizer();
+  const read = (file) => groupLines(JSON.parse(readFileSync(new URL(`./fixtures/${file}`, import.meta.url)))
+    .map((points, i) => ({ id: file + i, points })))
+    .map((l) => readLine(l.strokes, rec, 'math', null, model).text);
+  assert.deepEqual(read('user-graph-phone.json'), ['3x4=', '9x4=', 'y=2x+3']);
+  assert.deepEqual(read('user-graph-tablet.json'), ['y=2x+1', 'y=2x^(2)', 'y=3x^(2)']);
+  for (const t of ['y=2x+3', 'y=2x^(2)', 'y=3x^(2)']) assert.equal(interpretLine(t).kind, 'function');
+});

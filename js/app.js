@@ -8,6 +8,7 @@ import { beautifyLine } from './beautify.js';
 import { interpretLine, evaluate, freeVars, formatNumber } from './mathparse.js';
 import { writeText, addSample } from './handwriting.js';
 import { GraphWindow } from './graph.js';
+import { InlineGraphs } from './inlinegraph.js';
 import { drawStroke, invalidate } from './render.js';
 import { pathLength, dist, pointInPolygon, unionBox, median, hashString } from './geometry.js';
 import * as store from './storage.js';
@@ -17,7 +18,7 @@ import { transcribe } from './claude.js';
 const COLORS = ['ink', '#0a84ff', '#ff3b30', '#30d158', '#ff9f0a', '#bf5af2'];
 const WIDTHS = [2, 3.5, 6];
 const DEFAULT_SETTINGS = {
-  smartScript: true, autoShapes: true, showRecognized: false, paper: 'dots',
+  smartScript: true, autoShapes: true, showRecognized: false, paper: 'dots', inlineGraphs: true,
   useClaude: false, apiKey: '', model: 'claude-opus-5-5', lastNote: null, sidebar: true,
 };
 const HOLD_MS = 550;
@@ -52,9 +53,14 @@ const app = {
   claudePending: new Set(),
   answerCache: new Map(),
   sampledKeys: new Set(),
+  hiddenGraphs: new Set(), // equations whose inline graph the user closed
 };
 app.recognizer.setUserSamples(app.samples);
 const graph = new GraphWindow(stage);
+const inlineGraphs = new InlineGraphs(overlay, {
+  onExpand: (key) => openGraph(key),
+  onHide: (key) => { app.hiddenGraphs.add(key); requestRender(); },
+});
 
 // ───────────────────────── helpers ─────────────────────────
 const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -395,7 +401,14 @@ function answerStrokes(a) {
 }
 
 function positionChips() {
-  const want = mode() === 'math' ? app.functions : [];
+  const math = mode() === 'math';
+  // A graph card beside every equation; equations whose card was closed (or all,
+  // when inline graphs are off) get a small "Graph" chip on their left instead.
+  const showInline = math && app.settings.inlineGraphs;
+  const inline = showInline ? app.functions.filter((f) => !app.hiddenGraphs.has(f.key)) : [];
+  inlineGraphs.update(inline);
+  inlineGraphs.layout(toScreen, app.view.s, stage.clientWidth);
+  const want = math ? app.functions.filter((f) => !inline.includes(f)) : [];
   const existing = new Map([...overlay.querySelectorAll('.graph-chip')].map((el) => [el.dataset.key, el]));
   for (const f of want) {
     let el = existing.get(f.key);
@@ -406,7 +419,9 @@ function positionChips() {
       el.innerHTML = '<svg viewBox="0 0 24 24"><path d="M4 4v16h16"/><path d="M7 16c3-9 6-9 8-4s3 2 4-2"/></svg><span>Graph</span>';
       el.title = 'Show this equation on a graph';
       el.setAttribute('aria-label', 'Graph ' + f.label);
-      el.onclick = () => openGraph(f.key);
+      el.onclick = () => {
+        if (app.settings.inlineGraphs) { app.hiddenGraphs.delete(f.key); requestRender(); } else openGraph(f.key);
+      };
       overlay.appendChild(el);
     }
     existing.delete(f.key);
@@ -473,7 +488,7 @@ canvas.addEventListener('pointerdown', (e) => {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (touches.size >= 2 || penSeen) {
       // Second finger: cancel any stroke started by the first one and pinch instead.
-      if (drawing && drawing.pointerType === 'touch') { drawing = null; clearInterval(holdTimer); }
+      if (drawing && drawing.pointerType === 'touch') { drawing = null; clearInterval(holdTimer); overlay.classList.remove('writing'); }
       lasso = null; erasing = null;
       startPinch();
       return;
@@ -645,6 +660,7 @@ function startStroke(e, p) {
   };
   clearInterval(holdTimer);
   holdTimer = setInterval(checkHold, 80);
+  overlay.classList.add('writing');
 }
 
 function extendStroke(e) {
@@ -711,6 +727,7 @@ const shapeName = (t) => ({ line: 'Line', polyline: 'Lines', circle: 'Circle', e
 
 function finishStroke(cancelled) {
   clearInterval(holdTimer);
+  overlay.classList.remove('writing');
   const d = drawing;
   drawing = null;
   if (cancelled || !d) { requestRender(); return; }
@@ -923,8 +940,12 @@ function runMath() {
         const vars = [...freeVars(interp.ast)].filter((v) => v !== interp.variable);
         const params = {};
         for (const v of vars) if (v in scope) params[v] = scope[v];
+        // Keyed by the "=" so the graph keeps its place while the equation is edited.
+        const eqStroke = eqs[0]?.strokes[0]?.id;
         functions.push({
-          key: sig, label: `${interp.name === 'y' ? 'y' : interp.name + '(' + interp.variable + ')'}=${interp.src}`,
+          key: eqStroke ? 'eq:' + eqStroke : sig,
+          line: res.box, lineH: res.answerAt?.capH ?? res.lineH,
+          label: `${interp.name === 'y' ? 'y' : interp.name + '(' + interp.variable + ')'}=${interp.src}`,
           ast: interp.ast, scope: { ...scope }, params, variable: interp.variable,
           // Left of the equation: the space after it is where people keep writing.
           anchor: { x: res.box.minX - 10 / app.view.s, y: res.box.minY + res.box.h / 2 },
@@ -1072,7 +1093,7 @@ function closeMenu() { $('#menu').hidden = true; }
 function openSettings() {
   const dlg = $('#settings');
   const f = dlg.querySelector('form');
-  for (const k of ['smartScript', 'autoShapes', 'showRecognized', 'useClaude']) f.elements[k].checked = !!app.settings[k];
+  for (const k of ['smartScript', 'autoShapes', 'showRecognized', 'useClaude', 'inlineGraphs']) f.elements[k].checked = !!app.settings[k];
   f.elements.paper.value = app.settings.paper;
   f.elements.apiKey.value = app.settings.apiKey || '';
   f.elements.model.value = app.settings.model || DEFAULT_SETTINGS.model;
@@ -1081,7 +1102,7 @@ function openSettings() {
 
 function readSettingsForm() {
   const f = $('#settings form');
-  for (const k of ['smartScript', 'autoShapes', 'showRecognized', 'useClaude']) app.settings[k] = f.elements[k].checked;
+  for (const k of ['smartScript', 'autoShapes', 'showRecognized', 'useClaude', 'inlineGraphs']) app.settings[k] = f.elements[k].checked;
   app.settings.paper = f.elements.paper.value;
   app.settings.apiKey = f.elements.apiKey.value.trim();
   app.settings.model = f.elements.model.value.trim() || DEFAULT_SETTINGS.model;
@@ -1192,6 +1213,6 @@ boot();
 
 // A small hook for automated tests and for poking around from the console.
 window.__easyNote = {
-  app, graph, runMath, runSmartScript, undo, redo, setMode, setTool, zoomToFit, exportPdf, exportPng,
+  app, graph, inlineGraphs, runMath, runSmartScript, undo, redo, setMode, setTool, zoomToFit, exportPdf, exportPng,
   get mode() { return mode(); },
 };
