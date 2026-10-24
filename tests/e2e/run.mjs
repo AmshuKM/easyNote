@@ -142,6 +142,26 @@ await check('math mode answers a handwritten sum in handwriting', async () => {
   await page.context().close();
 });
 
+await check('real handwriting from a user screenshot gets the right answers', async () => {
+  const { readFileSync } = await import('node:fs');
+  const raw = JSON.parse(readFileSync(new URL('../fixtures/user-math-1.json', import.meta.url)));
+  const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
+  await ctx.addInitScript(() => localStorage.setItem('easynote.settings', JSON.stringify({ sidebar: false })));
+  const page = await ctx.newPage();
+  await page.goto(`http://localhost:${port}/`);
+  await page.waitForFunction(() => window.__easyNote?.app.classifier);
+  await page.click('[data-mode=math]');
+  // the screenshot's canvas started ~380px from the left and ~0px from the top
+  await draw(page, raw.map((s) => s.filter((_, i) => i % 2 === 0 || i === s.length - 1).map((p) => ({ x: p.x - 300, y: p.y - 60 }))));
+  await page.waitForTimeout(2500);
+  const answers = (await app(page, () => window.__easyNote.app.answers.map((a) => a.text))).sort();
+  const want = ['2', '2', '2', '24', '208', '280', '6'];
+  const hits = want.filter((w) => answers.includes(w)).length;
+  assert(hits === want.length, `answers ${JSON.stringify(answers)}`);
+  await shot(page, '04b-real-handwriting');
+  await ctx.close();
+});
+
 await check('variables carry to later lines', async () => {
   const page = await newPage();
   await page.click('[data-mode=math]');

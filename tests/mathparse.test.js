@@ -56,7 +56,9 @@ test('interpreting whole lines', () => {
 
 test('number formatting for answers', () => {
   assert.equal(formatNumber(15), '15');
-  assert.equal(formatNumber(1 / 3), '0.33333333');
+  assert.equal(formatNumber(1 / 3), '0.333333');
+  assert.equal(formatNumber(4 / 3), '1.333333');
+  assert.equal(formatNumber(1234.56789), '1234.568');
   assert.equal(formatNumber(0.1 + 0.2), '0.3');
   assert.equal(formatNumber(-2.5), '-2.5');
   assert.equal(formatNumber(1e15), '1e15');

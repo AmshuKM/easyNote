@@ -1,6 +1,7 @@
 // easyNote — app controller: canvas, input, tools, history and the
 // "intelligent" passes (shape snapping, Smart Script, handwritten math).
 import { Recognizer } from './recognizer.js';
+import { Classifier } from './classifier.js';
 import { recognizeShape } from './shapes.js';
 import { groupLines, readLine, strokeBox } from './ink.js';
 import { beautifyLine } from './beautify.js';
@@ -31,6 +32,7 @@ const app = {
   settings: store.loadSettings(DEFAULT_SETTINGS),
   samples: store.loadSamples(),
   recognizer: new Recognizer(),
+  classifier: null, // math handwriting network, loaded at boot
   note: null,
   strokes: [],
   history: [],
@@ -376,12 +378,16 @@ function drawPaper(W, H) {
 }
 
 function answerStrokes(a) {
-  const key = `${a.text}|${Math.round(a.x)}|${Math.round(a.baseline)}|${Math.round(a.capH)}|${a.sampleRev}`;
+  const key = `${a.text}|${Math.round(a.x)}|${Math.round(a.baseline)}|${Math.round(a.capH)}|${(a.angle || 0).toFixed(2)}|${a.inkWidth}|${a.sampleRev}`;
   let st = app.answerCache.get(key);
   if (!st) {
     const { strokes } = writeText(a.text, { x: a.x, baseline: a.baseline, capH: a.capH, seed: a.seed, samples: app.samples });
-    const w = Math.max(1.6, a.capH * 0.075);
-    st = strokes.map((points, i) => ({ id: 'ans' + i, points, width: w, tool: 'pen' }));
+    // Follow the slant of the line the sum was written on.
+    const c = Math.cos(a.angle || 0), s = Math.sin(a.angle || 0);
+    const turn = (p) => ({ ...p, x: a.x + (p.x - a.x) * c - (p.y - a.baseline) * s, y: a.baseline + (p.x - a.x) * s + (p.y - a.baseline) * c });
+    // Same pen width as the user's own ink on that line.
+    const w = a.inkWidth || Math.max(1.6, a.capH * 0.075);
+    st = strokes.map((points, i) => ({ id: 'ans' + i, points: points.map(turn), width: w, tool: 'pen' }));
     app.answerCache.set(key, st);
     if (app.answerCache.size > 400) app.answerCache.clear();
   }
@@ -850,7 +856,11 @@ function runSmartScript() {
 function tidyStrokes(list) {
   const changes = [];
   for (const line of groupLines(list)) {
-    const result = beautifyLine(line.strokes, app.recognizer, app.beautyCache, { maxCharH: 220 / app.view.s });
+    const result = beautifyLine(line.strokes, app.recognizer, app.beautyCache, {
+      maxCharH: 220 / app.view.s,
+      classifier: mode() === 'math' ? app.classifier : null,
+      layout: mode() !== 'math',
+    });
     for (const st of line.strokes) {
       const before = clone(st);
       before.beautified = true;
@@ -877,7 +887,7 @@ function runMath() {
     const lines = groupLines(inkStrokes()).filter((l) => l.strokes.length);
     let newSamples = false;
     for (const line of lines) {
-      const res = readLine(line.strokes, app.recognizer, 'math', app.recogCache);
+      const res = readLine(line.strokes, app.recognizer, 'math', app.recogCache, app.classifier);
       const sig = lineSignature(line.strokes);
       let text = res.text;
       if (app.settings.useClaude && app.settings.apiKey && text.includes('=')) {
@@ -889,18 +899,15 @@ function runMath() {
       let interp;
       try { interp = interpretLine(text); } catch { interp = { kind: 'none' }; }
       const eqs = res.groups.filter((g) => g.ch === '=');
-      const lineH = res.lineH;
-      const bottoms = res.groups.filter((g) => !g.sup && /[0-9a-z()]/i.test(g.ch) && g.box.h > 0.5 * lineH).map((g) => g.box.maxY);
-      const baseline = bottoms.length ? median(bottoms) : res.box.maxY;
-      if (interp.kind === 'eval' && eqs.length) {
+      if (interp.kind === 'eval' && eqs.length && res.answerAt) {
         let value;
         try { value = evaluate(interp.ast, scope); } catch { value = undefined; }
         if (value !== undefined) {
-          const eq = eqs[eqs.length - 1];
-          const capH = Math.max(lineH, 14);
+          const at = res.answerAt;
+          const inkWidth = median(line.strokes.map((s) => s.width || WIDTHS[1]));
           answers.push({
             key: sig, text: formatNumber(value), value,
-            x: eq.box.maxX + capH * 0.35, baseline, capH,
+            x: at.x, baseline: at.y, capH: at.capH, angle: at.angle, inkWidth,
             seed: hashString(sig), sampleRev: sampleRevision,
           });
           if (Number.isFinite(value)) newSamples = collectSamples(res.groups) || newSamples;
@@ -939,8 +946,10 @@ let sampleRevision = 0;
 function collectSamples(groups) {
   let added = false;
   for (const g of groups) {
-    if (!/^[0-9]$/.test(g.ch) || g.sup || g.rule) continue;
-    if (g.cands[0]?.ch !== g.ch) continue;
+    if (!/^[0-9]$/.test(g.ch) || g.sup || g.rule || g.split) continue;
+    // Only learn from characters read with high confidence, so a misread
+    // never teaches the app the wrong shape for a digit.
+    if (g.cands[0]?.ch !== g.ch || g.source !== 'cnn' || g.cands[0].p < 0.97) continue;
     const key = g.strokes.map((s) => s.id).join(',');
     if (app.sampledKeys.has(key)) continue;
     app.sampledKeys.add(key);
@@ -1164,6 +1173,16 @@ function boot() {
   const notes = store.listNotes();
   const last = notes.find((n) => n.id === app.settings.lastNote) || notes[0];
   if (last) openNote(last.id); else newNote('notes');
+  Classifier.load()
+    .then((c) => {
+      app.classifier = c;
+      app.recogCache.clear();
+      runMath();
+    })
+    .catch((err) => {
+      console.warn('easyNote: handwriting model failed to load, using templates only', err);
+      toast('Could not load the handwriting model — recognition will be less accurate');
+    });
 }
 
 boot();

@@ -197,7 +197,8 @@ export function formatNumber(v) {
     const [m, e] = v.toExponential(6).split('e');
     return `${trimZeros(m)}e${parseInt(e, 10)}`;
   }
-  const decimals = Math.max(0, Math.min(8, 9 - Math.floor(Math.log10(abs)) - 1));
+  // Up to 7 significant digits (6 decimals at most), like a calculator display.
+  const decimals = Math.max(0, Math.min(6, 6 - Math.floor(Math.log10(abs))));
   return trimZeros(v.toFixed(decimals));
 }
 const trimZeros = (s) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);

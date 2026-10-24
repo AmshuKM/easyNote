@@ -2,7 +2,7 @@
 const INDEX = 'easynote.index';
 const NOTE = (id) => `easynote.note.${id}`;
 const SETTINGS = 'easynote.settings';
-const SAMPLES = 'easynote.samples';
+const SAMPLES = 'easynote.samples.v2'; // v1 could contain misread digits
 
 function read(key, fallback) {
   try {

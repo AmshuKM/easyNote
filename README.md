@@ -12,7 +12,7 @@ An intelligent whiteboard and note-taking app for the browser, inspired by the i
 - **Notes are saved automatically** in your browser (multiple notes in the sidebar), and you can **export PNG or PDF**.
 - **Light and dark mode**, phone, tablet and desktop layouts.
 
-Everything runs **offline in the browser** with no build step and no dependencies. Recognition uses a built-in stroke recognizer. Optionally, you can add your own Anthropic API key in **Settings** to have math lines read by Claude for higher accuracy on messy handwriting (see [Privacy](#privacy)).
+Everything runs **offline in the browser** with no build step and no dependencies. Math is read by a small neural network trained on real handwriting (MNIST) plus synthetic symbols, running directly in the page (~85 KB of weights, ~1.5 ms per character). Optionally, you can add your own Anthropic API key in **Settings** to have math lines read by Claude for higher accuracy on messy handwriting (see [Privacy](#privacy)).
 
 ## Run it
 
@@ -46,15 +46,27 @@ Settings (**⋯ → Settings**) let you toggle Smart Script, automatic shape cor
 | --- | --- |
 | `js/app.js` | App controller: canvas input, tools, history, rendering, scheduling the smart passes |
 | `js/shapes.js` | Fits lines, polylines, circles/ellipses (PCA) and polygons (corner detection + least-squares sides), then blends the ideal shape with a smoothed share of your original wobble |
-| `js/recognizer.js` | `$P` point-cloud recognizer (stroke-order independent), two-pass for speed, with slant/width-augmented templates plus samples learned from you |
+| `js/classifier.js`, `js/raster.js` | Math character recognizer: strokes are rendered MNIST-style to 28×28 and read by a small CNN (2 conv + 2 dense layers, int8 weights in `models/`). It has a "not a character" class used to split joined-up digits |
+| `js/recognizer.js` | `$P` point-cloud recognizer for letters (Smart Script in Notes mode) |
 | `js/glyphs.js` | Stroke templates for digits, operators and letters (also used to write answers when it hasn't seen your digits yet) |
-| `js/ink.js` | Groups strokes into lines and characters, rules for `= - . ( ) /`, context-aware math reading, function names and superscripts |
+| `js/ink.js` | Groups strokes into lines and characters, levels slanted lines, splits joined-up digits by recognition, rules for `= - . ÷ ( ) /`, function names and superscripts |
 | `js/beautify.js` | Smart Script: deskew, baseline, size and spacing normalisation, smoothing |
 | `js/mathparse.js` | Tokenizer, parser and evaluator with implicit multiplication, functions, variables |
 | `js/handwriting.js` | Writes answers using your own digit samples, with natural variation |
 | `js/graph.js` | Floating graph window |
 | `js/claude.js` | Optional Claude vision transcription (uses the official SDK, vendored in `vendor/`) |
 | `js/storage.js`, `js/export.js` | localStorage persistence; PNG and a dependency-free PDF writer |
+
+## Retraining the handwriting model
+
+```sh
+python -m venv venv && venv/bin/pip install "jax[cpu]" optax numpy pillow
+node scripts/train/gen-synth.mjs data 5000 1500        # synthetic symbols, rendered like the app does
+curl -o data/mnist.npz https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz
+venv/bin/python scripts/train/train.py data             # ~6 min on a laptop CPU → models/
+```
+
+Current model: 98.4% on the MNIST test set (writers it never saw). `tests/real-handwriting.test.js` checks it against strokes traced from a real user's screenshot.
 
 ## Tests
 
@@ -71,7 +83,7 @@ Your notes never leave your browser. If you turn on Claude recognition, an image
 
 ## Limitations
 
-- Offline recognition is tuned for printed (not joined-up cursive) handwriting. Digits, operators and the variables `x y a b c n k m` work best. Turn on Claude recognition for messier writing.
+- Offline recognition handles digits, operators and the variables `x y a b c n` best, including digits written joined-up. Very unusual shapes can still be misread (for example an `8` with an open top can read as `9`). Turn on **Show recognized text** in Settings to see what was read, or Claude recognition for messier writing.
 - Fractions written as a stacked bar, and radicals spanning an expression, are not parsed offline. Write `(a+b)/c` and `sqrt(…)` instead, or use Claude recognition.
 - Notes are stored per browser. Export PNG/PDF to keep copies.
 
