@@ -31,8 +31,15 @@ class DSU {
   }
 }
 
+// Character height for line grouping: the median is dragged down by short
+// strokes ("=" bars, lowercase letters, a "^"), so use a higher percentile.
+export function lineHeightEstimate(strokes) {
+  const hs = strokes.map((s) => strokeBox(s).h).filter((h) => h > 4).sort((a, b) => a - b);
+  return Math.max(12, hs.length ? hs[Math.floor((hs.length - 1) * 0.85)] : 24);
+}
+
 // Cluster strokes into writing lines (works anywhere on an infinite canvas).
-export function groupLines(strokes, refH = typicalHeight(strokes)) {
+export function groupLines(strokes, refH = lineHeightEstimate(strokes)) {
   const boxes = strokes.map((s) => {
     const b = strokeBox(s);
     const cy = (b.minY + b.maxY) / 2;
@@ -49,7 +56,10 @@ export function groupLines(strokes, refH = typicalHeight(strokes)) {
       // Pieces of one character (boxes that overlap or nearly touch) always share a line.
       const m = 0.15 * refH;
       const boxesMeet = a.minX - m < b.maxX && b.minX - m < a.maxX && a.minY - m < b.maxY && b.minY - m < a.maxY;
-      if ((vo > 0.35 * minH && gap < 1.6 * refH) || boxesMeet) dsu.union(i, j);
+      // Same line: vertical centres close compared with the taller of the two.
+      const dc = Math.abs((a.minY + a.maxY) - (b.minY + b.maxY)) / 2;
+      const sameRow = dc < 0.55 * Math.max(a.h, b.h, refH) || vo > 0.35 * minH;
+      if ((sameRow && gap < 1.5 * refH) || boxesMeet) dsu.union(i, j);
     }
   }
   let lines = dsu.groups().map((idx) => {
@@ -70,6 +80,30 @@ export function groupLines(strokes, refH = typicalHeight(strokes)) {
       best.strokes.push(...dot.strokes);
       best.box = unionBox([best.box, dot.box]);
       dot.strokes = [];
+    }
+  }
+  lines = lines.filter((l) => l.strokes.length);
+  // Small marks just above the end of a line — an exponent like the "2" in x²,
+  // or a caret — belong to that line, not to a line of their own.
+  const isSatellite = (l) => l.strokes.length <= 3 && l.box.w < 1.6 * Math.max(refH, l.box.h);
+  for (const sat of lines.filter(isSatellite)) {
+    let best = null, bestD = Infinity;
+    for (const l of lines) {
+      if (l === sat || !l.strokes.length || l.strokes.length <= sat.strokes.length) continue;
+      if (sat.box.h > 0.8 * l.box.h) continue; // an exponent is smaller than the line it sits on
+      const below = l.box.minY - sat.box.maxY;           // how far the mark floats above the line
+      const raised = (sat.box.minY + sat.box.maxY) / 2 < (l.box.minY + l.box.maxY) / 2;
+      const gapX = Math.max(0, sat.box.minX - l.box.maxX, l.box.minX - sat.box.maxX);
+      const reach = Math.max(0.8 * refH, 1.3 * sat.box.h); // exponents sit a little apart
+      if (raised && below < reach && sat.box.maxY > l.box.minY - reach && gapX < reach) {
+        const d = gapX + Math.max(0, below);
+        if (d < bestD) { bestD = d; best = l; }
+      }
+    }
+    if (best) {
+      best.strokes.push(...sat.strokes);
+      best.box = unionBox([best.box, sat.box]);
+      sat.strokes = [];
     }
   }
   lines = lines.filter((l) => l.strokes.length);
@@ -102,7 +136,9 @@ export function segmentChars(strokes, lineH) {
       // flat bars ("="); otherwise it is e.g. an exponent above its base.
       const vGap = Math.max(a.minY, b.minY) - Math.min(a.maxY, b.maxY);
       const stacked = vGap > 0.05 * lineH;
-      const bars = a.h < 0.3 * lineH && b.h < 0.3 * lineH;
+      // flat relative to their own length, so wobbly "=" bars still count
+      const bars = (a.h < 0.3 * lineH && b.h < 0.3 * lineH)
+        || (a.h < 0.45 * a.w && b.h < 0.45 * b.w && a.h < 0.4 * lineH && b.h < 0.4 * lineH && vGap < 0.7 * lineH);
       if (stacked && !bars) {
         if (r > 0.1 && touches(order[i], order[j], 0.12 * lineH)) dsu.union(i, j);
       } else if (r > 0.45 || (r > 0.1 && touches(order[i], order[j], 0.12 * lineH))) dsu.union(i, j);
@@ -332,6 +368,7 @@ function readLineCore(strokes, recognizer, mode, cache, classifier) {
   }
   if (mode === 'math') {
     applyFunctionNames(groups);
+    applyGrammar(groups);
     markSuperscripts(groups, lineH);
   }
   return { groups, lineH, text: buildText(groups, mode), box: unionBox(groups.map((g) => g.box)), answerAt: answerAnchor(groups, lineH) };
@@ -493,7 +530,8 @@ function applyFunctionNames(groups) {
         const g = groups[i + k];
         if (g.rule && g.rule !== '1') { ok = false; break; }
         const best = g.cands[0]?.dist ?? 0;
-        const hit = g.cands.find((c) => c.ch === name[k] || (name[k] === 'i' && c.ch === '1') || (name[k] === 'l' && c.ch === '1'));
+        // an "i" without its dot easily reads as 1 ) ( or /
+        const hit = g.cands.find((c) => c.ch === name[k] || (name[k] === 'i' && '1)(/'.includes(c.ch)) || (name[k] === 'l' && c.ch === '1'));
         if (!hit && !(g.rule === '1' && 'il'.includes(name[k]))) ok = false;
         else if (hit && (g.source === 'cnn' ? hit.dist > best + 3 : hit.dist > best * 1.45 + 0.05)) ok = false;
         if (LETTERS.includes(g.cands[0]?.ch)) letterTop++;
@@ -508,12 +546,43 @@ function applyFunctionNames(groups) {
   }
 }
 
+// How much less likely the network found `ch` than its first choice for this
+// group (in -ln p); Infinity when it is not among the candidates at all.
+function extraCost(g, ch) {
+  if (g.rule || g.source !== 'cnn') return Infinity;
+  const c = g.cands.find((k) => k.ch === ch);
+  const top = g.cands.find((k) => k.ch === g.ch) ?? g.cands[0];
+  return c ? c.dist - top.dist : Infinity;
+}
+
+// Use the shape of the whole line to settle ambiguous characters:
+//   "4=2x+1"  → "y=2x+1"   (a lone symbol before "=" with x on the right is y)
+//   "√(x)=x²" → "f(x)=x²"  (a letter before "(x)=" names a function)
+function applyGrammar(groups) {
+  const chars = groups.map((g) => g.ch);
+  const eq = chars.indexOf('=');
+  if (eq === 1 && chars.slice(2).includes('x') && groups[0].ch !== 'y' && extraCost(groups[0], 'y') < 6) {
+    groups[0].ch = 'y';
+  }
+  if (eq === 4 && chars[1] === '(' && chars[2] === 'x' && chars[3] === ')' && !/[a-z]/.test(chars[0])) {
+    const pick = ['f', 'g', 'h'].map((ch) => [ch, extraCost(groups[0], ch)]).sort((a, b) => a[1] - b[1])[0];
+    groups[0].ch = pick[1] < 8 ? pick[0] : 'f';
+  }
+}
+
 function markSuperscripts(groups, lineH) {
-  const normal = groups.filter((g) => g.box.h > 0.6 * lineH && /[0-9a-z()]/i.test(g.ch));
-  if (!normal.length) return;
-  // The baseline may slope (lines drift up or down); exponents must sit above it locally.
-  const baselineAt = fitBaseline(normal);
-  const raised = (g) => g.box.maxY < baselineAt((g.box.minX + g.box.maxX) / 2) - 0.35 * lineH && g.box.h <= 1.0 * lineH;
+  // Baseline from characters that sit on it: not letters with tails (y g p q j),
+  // not tiny marks, and never the character being tested (leave-one-out).
+  const onBase = groups.filter((g) => g.box.h > 0.4 * lineH && /[0-9a-z()+x*]/i.test(g.ch) && !'ygpqj'.includes(g.ch));
+  if (!onBase.length) return;
+  const baselineFor = (g) => {
+    const pts = onBase.filter((o) => o !== g);
+    if (!pts.length) return () => Infinity;
+    // Too few characters to measure a slope: stay flat at the lowest bottom.
+    if (pts.length < 3) { const y = Math.max(...pts.map((o) => o.box.maxY)); return () => y; }
+    return fitBaseline(pts);
+  };
+  const raised = (g) => g.box.maxY < baselineFor(g)((g.box.minX + g.box.maxX) / 2) - 0.35 * lineH && g.box.h <= 1.2 * lineH;
   for (let i = 1; i < groups.length; i++) {
     const g = groups[i];
     const prev = groups[i - 1];
@@ -522,7 +591,10 @@ function markSuperscripts(groups, lineH) {
     if (!/[0-9a-z()+-]/i.test(g.ch)) continue;
     const aboveMiddle = g.box.maxY < prev.box.minY + 0.62 * prev.box.h;
     // An exponent continues another exponent, or follows a full-size base character.
-    const fullBase = prev.box.h > 0.75 * lineH || prev.ch === ')';
+    const fullBase = prev.box.h > 0.75 * lineH || prev.ch === ')' || /[a-z]/.test(prev.ch);
+    // A small raised digit right after a "+"/"×"-looking mark: that mark is the
+    // variable x (x²), not an operator.
+    if (raised(g) && aboveMiddle && !prev.sup && /[0-9]/.test(g.ch) && '+*'.includes(prev.ch) && extraCost(prev, 'x') < 10) prev.ch = 'x';
     if (raised(g) && (prev.sup || (fullBase && aboveMiddle && /[0-9a-z)]/i.test(prev.ch)))) g.sup = true;
   }
 }

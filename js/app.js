@@ -404,6 +404,8 @@ function positionChips() {
       el.className = 'graph-chip';
       el.dataset.key = f.key;
       el.innerHTML = '<svg viewBox="0 0 24 24"><path d="M4 4v16h16"/><path d="M7 16c3-9 6-9 8-4s3 2 4-2"/></svg><span>Graph</span>';
+      el.title = 'Show this equation on a graph';
+      el.setAttribute('aria-label', 'Graph ' + f.label);
       el.onclick = () => openGraph(f.key);
       overlay.appendChild(el);
     }
@@ -924,7 +926,8 @@ function runMath() {
         functions.push({
           key: sig, label: `${interp.name === 'y' ? 'y' : interp.name + '(' + interp.variable + ')'}=${interp.src}`,
           ast: interp.ast, scope: { ...scope }, params, variable: interp.variable,
-          anchor: { x: res.box.maxX + 14 / app.view.s, y: res.box.minY + (res.box.h - 24 / app.view.s) / 2 },
+          // Left of the equation: the space after it is where people keep writing.
+          anchor: { x: res.box.minX - 10 / app.view.s, y: res.box.minY + res.box.h / 2 },
         });
       }
     }

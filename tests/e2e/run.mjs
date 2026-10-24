@@ -230,6 +230,40 @@ await check('hybrid mode: Claude transcription is used when an API key is set', 
   await ctx.close();
 });
 
+await check('graphing y = x² written with a raised exponent', async () => {
+  const page = await newPage();
+  await page.click('[data-mode=math]');
+  await draw(page, handwriteText('y=x', { x: 300, y: 300, h: 44, seed: 21, noise: 1.3 }));
+  await draw(page, handwriteText('2', { x: 412, y: 284, h: 24, seed: 22, noise: 1.3 }));
+  await page.waitForTimeout(1500);
+  await page.waitForSelector('.graph-chip', { timeout: 3000 });
+  await page.click('.graph-chip');
+  const legend = await page.textContent('.graph-legend');
+  assert(legend.includes('x²'), `legend: ${legend}`);
+  const ys = await page.evaluate(() => {
+    const g = window.__easyNote.graph;
+    const fn = g.fnFor(g.functions[0]);
+    return [fn(-2), fn(0), fn(3)];
+  });
+  assert(ys.join() === '4,0,9', `y values ${ys}`);
+  // the curve is actually drawn: count orange-ish pixels on the graph canvas
+  const inked = await page.evaluate(() => {
+    const c = document.querySelector('.graph-canvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 120 && d[i + 1] < 190 && d[i + 2] < 80) n++;
+    return n;
+  });
+  assert(inked > 200, `curve pixels ${inked}`);
+  // editing the equation updates the open graph: add "+1" → y = x² + 1
+  await draw(page, handwriteText('+1', { x: 440, y: 300, h: 44, seed: 23, noise: 1.3 }));
+  await page.waitForTimeout(1500);
+  const y0 = await page.evaluate(() => { const g = window.__easyNote.graph; return g.fnFor(g.functions[0])(0); });
+  assert(y0 === 1, `after edit y(0) = ${y0}`);
+  await shot(page, '05b-graph-parabola');
+  await page.context().close();
+});
+
 await check('undo/redo, eraser and persistence', async () => {
   const page = await newPage();
   await draw(page, [roughCircle(300, 300, 60)]);
