@@ -1,0 +1,13 @@
+{
+  "name": "easynote",
+  "version": "1.0.0",
+  "description": "An intelligent handwriting whiteboard with shape snapping, Smart Script and handwritten math.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node --test tests/*.test.js",
+    "test:e2e": "node tests/e2e/run.mjs"
+  },
+  "license": "MIT"
+}

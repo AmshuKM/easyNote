@@ -1,0 +1,10 @@
+{
+  "name": "easyNote",
+  "short_name": "easyNote",
+  "description": "An intelligent whiteboard that tidies handwriting, snaps shapes and solves handwritten math.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f3ee",
+  "theme_color": "#f5f3ee",
+  "icons": [{ "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
