@@ -1,0 +1,35 @@
+{
+ "confirmed": false,
+ "lines": [
+  {
+   "text": "y=2x+1",
+   "expect": "graph",
+   "bbox": [
+    345,
+    684,
+    415,
+    100
+   ]
+  },
+  {
+   "text": "y=2x^(2)",
+   "expect": "graph",
+   "bbox": [
+    365,
+    738,
+    500,
+    201
+   ]
+  },
+  {
+   "text": "y=3x^(2)",
+   "expect": "graph",
+   "bbox": [
+    370,
+    869,
+    655,
+    265
+   ]
+  }
+ ]
+}

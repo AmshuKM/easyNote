@@ -1,135 +1,82 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="theme-color" content="#f5f3ee" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="description" content="easyNote: an intelligent whiteboard that tidies your handwriting, snaps shapes and solves handwritten math.">
-  <title>easyNote</title>
-  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="css/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>easyNote</title>
+<meta name="description" content="Handwriting whiteboard and math notes.">
+<meta name="color-scheme" content="light dark">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon.svg">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%232f6fed%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/app.css">
 </head>
 <body>
-  <div id="app">
-    <script>
-      // Decide sidebar visibility before first paint to avoid a slide-out flash.
-      try {
-        const s = JSON.parse(localStorage.getItem('easynote.settings') || '{}');
-        if (s.sidebar === false || window.innerWidth < 760) document.getElementById('app').classList.add('sidebar-hidden');
-      } catch { if (window.innerWidth < 760) document.getElementById('app').classList.add('sidebar-hidden'); }
-    </script>
-    <aside id="sidebar" aria-label="Notes">
-      <div class="side-head">
-        <span class="brand">easy<b>Note</b></span>
-        <button class="icon-btn" id="newNote" title="New note" aria-label="New note">
-          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-        </button>
-      </div>
-      <ul id="noteList"></ul>
-      <div class="side-foot">Notes are saved in this browser.</div>
-    </aside>
+<div id="app">
+  <header id="toolbar" role="toolbar" aria-label="Drawing tools">
+    <button id="btn-sidebar" class="tb" type="button" aria-label="Notes list" title="Notes">&#9776;</button>
+    <div class="group" id="tools" role="group" aria-label="Tool">
+      <button class="tb tool" type="button" data-tool="pen" aria-pressed="true" title="Pen">Pen</button>
+      <button class="tb tool" type="button" data-tool="highlighter" aria-pressed="false" title="Highlighter">Hi</button>
+      <button class="tb tool" type="button" data-tool="eraser" aria-pressed="false" title="Eraser">Erase</button>
+      <button class="tb tool" type="button" data-tool="lasso" aria-pressed="false" title="Lasso">Lasso</button>
+      <button class="tb tool" type="button" data-tool="hand" aria-pressed="false" title="Hand (pan)">Hand</button>
+    </div>
+    <div class="group" id="colors" role="group" aria-label="Colour"></div>
+    <div class="group" id="sizes" role="group" aria-label="Size">
+      <button class="tb size" type="button" data-size="S" aria-pressed="false" title="Small">S</button>
+      <button class="tb size" type="button" data-size="M" aria-pressed="true" title="Medium">M</button>
+      <button class="tb size" type="button" data-size="L" aria-pressed="false" title="Large">L</button>
+    </div>
+    <div class="group">
+      <button id="btn-undo" class="tb" type="button" aria-label="Undo" title="Undo" disabled>&#8630;</button>
+      <button id="btn-redo" class="tb" type="button" aria-label="Redo" title="Redo" disabled>&#8631;</button>
+    </div>
+    <div class="group" id="mode" role="group" aria-label="Mode">
+      <button class="tb mode" type="button" data-mode="notes" aria-pressed="true">Notes</button>
+      <button class="tb mode" type="button" data-mode="math" aria-pressed="false">Math</button>
+    </div>
+    <span id="read-dot" class="dot" data-source="offline" role="img" aria-label="Read offline" title="Last math line read offline"></span>
+    <button id="btn-menu" class="tb" type="button" aria-label="Menu" title="Menu">&#8943;</button>
+  </header>
 
-    <main id="stage">
-      <canvas id="board" aria-label="Whiteboard"></canvas>
-      <div id="overlay"></div>
-      <div id="emptyHint" hidden>
-        <h2>Write or draw anywhere</h2>
-        <p><b>Shapes:</b> draw a circle, rectangle, triangle or line and pause at the end of the stroke to snap it. Large shapes snap on their own.</p>
-        <p><b>Smart Script:</b> your handwriting is straightened and tidied after you pause.</p>
-        <p><b>Math:</b> switch to <em>Math</em> and write <code>12 × 3 =</code>, <code>a = 5</code> or <code>y = x^2</code>.</p>
-      </div>
+  <aside id="sidebar" aria-label="Notes">
+    <div class="sidebar-head"><strong>Notes</strong><button id="btn-new-note" class="tb" type="button">New</button></div>
+    <ul id="note-list"></ul>
+  </aside>
 
-      <header class="toolbar" role="toolbar" aria-label="Tools">
-        <button class="icon-btn" id="toggleSidebar" title="Notes" aria-label="Show notes">
-          <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-        </button>
-        <div class="segmented" id="modeSwitch" role="radiogroup" aria-label="Mode">
-          <button data-mode="notes" role="radio">Notes</button>
-          <button data-mode="math" role="radio">Math</button>
-        </div>
-        <span class="sep"></span>
-        <div class="tools" id="tools">
-          <button class="icon-btn tool" data-tool="pen" title="Pen (P)" aria-label="Pen">
-            <svg viewBox="0 0 24 24"><path d="M4 20l1.5-5L16 4.5a2.1 2.1 0 013 3L8.5 18 4 20z"/><path d="M14 6.5l3 3"/></svg>
-          </button>
-          <button class="icon-btn tool" data-tool="highlighter" title="Highlighter (H)" aria-label="Highlighter">
-            <svg viewBox="0 0 24 24"><path d="M9 15l-3 3h4l1-1"/><path d="M9 15l7.5-9.5a2 2 0 013 2.5L12 17z"/><path d="M4 21h16" opacity=".5"/></svg>
-          </button>
-          <button class="icon-btn tool" data-tool="eraser" title="Eraser (E)" aria-label="Eraser">
-            <svg viewBox="0 0 24 24"><path d="M8 20h12"/><path d="M5.5 15.5l9-9a2 2 0 012.8 0l1.2 1.2a2 2 0 010 2.8L11 18H8l-2.5-2.5z"/></svg>
-          </button>
-          <button class="icon-btn tool" data-tool="lasso" title="Lasso select (L)" aria-label="Lasso">
-            <svg viewBox="0 0 24 24"><path d="M7 15c-3-1.5-3.5-5 0-7.5s11-2 12.5 1.5-4 7-9 6.5" stroke-dasharray="2.5 2.5"/><path d="M8 15c-1 2 0 4 2 5"/></svg>
-          </button>
-          <button class="icon-btn tool" data-tool="hand" title="Pan (Space)" aria-label="Pan">
-            <svg viewBox="0 0 24 24"><path d="M8 13V6.5a1.5 1.5 0 013 0V12m0-6.5v-1a1.5 1.5 0 013 0V12m0-6a1.5 1.5 0 013 0v7m0-4a1.5 1.5 0 013 0v5a7 7 0 01-7 7h-1.5a7 7 0 01-5.5-2.7L4.2 14.5a1.6 1.6 0 012.5-2L8 14"/></svg>
-          </button>
-        </div>
-        <span class="sep"></span>
-        <div class="colors" id="colors"></div>
-        <button class="icon-btn" id="widthBtn" title="Pen size" aria-label="Pen size"><span class="width-dot"></span></button>
-        <span class="sep"></span>
-        <button class="icon-btn" id="undo" title="Undo (Ctrl+Z)" aria-label="Undo">
-          <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 010 11H11"/></svg>
-        </button>
-        <button class="icon-btn" id="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
-          <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 000 11H13"/></svg>
-        </button>
-        <button class="icon-btn" id="graphBtn" title="Graph" aria-label="Open graph">
-          <svg viewBox="0 0 24 24"><path d="M4 4v16h16"/><path d="M7 16c3-9 6-9 8-4s3 2 4-2"/></svg>
-        </button>
-        <div class="menu-wrap">
-          <button class="icon-btn" id="menuBtn" title="More" aria-label="More" aria-haspopup="true">
-            <svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18" cy="12" r="1.3"/></svg>
-          </button>
-          <div class="menu" id="menu" hidden>
-            <button data-act="png">Export PNG</button>
-            <button data-act="pdf">Export PDF</button>
-            <button data-act="fit">Zoom to fit</button>
-            <button data-act="clear">Clear page</button>
-            <hr>
-            <button data-act="settings">Settings…</button>
-          </div>
-        </div>
-      </header>
-
-      <div class="selection-bar" id="selectionBar" hidden>
-        <button data-act="duplicate">Duplicate</button>
-        <button data-act="straighten">Tidy</button>
-        <button data-act="delete" class="danger">Delete</button>
-      </div>
-      <div class="zoom-ind" id="zoomInd" title="Reset zoom">100%</div>
-      <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    </main>
+  <main id="stage">
+    <canvas id="board"></canvas>
+    <div id="cards"></div>
+    <div id="debug" aria-hidden="true"></div>
+    <div id="selbar" role="toolbar" aria-label="Selection" hidden>
+      <button id="sel-dup" class="tb" type="button">Duplicate</button>
+      <span id="sel-colors" role="group" aria-label="Recolor"></span>
+      <button id="sel-del" class="tb" type="button">Delete</button>
+    </div>
+  </main>
+  <div id="menu" role="menu" aria-label="Menu" hidden>
+    <button id="menu-png" class="tb" type="button" role="menuitem">Export PNG</button>
+    <button id="menu-pdf" class="tb" type="button" role="menuitem">Export PDF</button>
+    <button id="menu-settings" class="tb" type="button" role="menuitem">Settings</button>
   </div>
-
-  <dialog id="settings">
+  <dialog id="settings" aria-labelledby="settings-title">
     <form method="dialog">
-      <h3>Settings</h3>
-      <label class="row"><input type="checkbox" name="smartScript"> <span><b>Smart Script</b><small>Straighten and tidy handwriting after you pause</small></span></label>
-      <label class="row"><input type="checkbox" name="autoShapes"> <span><b>Auto-correct shapes</b><small>Large shapes snap on release (pause at the end of any stroke to snap it)</small></span></label>
-      <label class="row"><input type="checkbox" name="inlineGraphs"> <span><b>Graphs beside equations</b><small>Draw a live graph next to every y = … or f(x) = … you write</small></span></label>
-      <label class="row"><input type="checkbox" name="showRecognized"> <span><b>Show recognized text</b><small>Shows what the recognizer read under each math line</small></span></label>
-      <label class="row"><span><b>Paper</b></span>
-        <select name="paper"><option value="dots">Dots</option><option value="lines">Lines</option><option value="grid">Grid</option><option value="plain">Plain</option></select>
-      </label>
-      <fieldset>
-        <legend>Claude recognition (optional)</legend>
-        <p class="muted">Recognition runs offline by default. If you add an Anthropic API key, math lines are also sent to Claude for more accurate reading. The key is stored only in this browser and sent only to the Anthropic API.</p>
-        <label class="row"><input type="checkbox" name="useClaude"> <span><b>Use Claude for math lines</b></span></label>
-        <label class="stack">API key <input type="password" name="apiKey" autocomplete="off" placeholder="sk-ant-…"></label>
-        <label class="stack">Model <input type="text" name="model" placeholder="claude-opus-5-5"></label>
-      </fieldset>
-      <div class="actions">
-        <button type="button" id="forgetSamples" class="link">Forget my handwriting samples</button>
-        <button value="ok" class="primary">Done</button>
-      </div>
+      <h2 id="settings-title">Settings</h2>
+      <label class="row"><input type="checkbox" name="smartScript"> Smart Script (tidy handwriting)</label>
+      <label class="row"><input type="checkbox" name="shapeSnap"> Shape snap (hold to straighten)</label>
+      <label class="row"><input type="checkbox" name="debugOverlay"> Show recognized text</label>
+      <label class="row">Angles <select name="angle"><option value="deg">Degrees</option><option value="rad">Radians</option></select></label>
+      <label class="row">Paper <select name="paper"><option value="blank">Blank</option><option value="lined">Lined</option><option value="grid">Grid</option><option value="dots">Dots</option></select></label>
+      <label class="row">Theme <select name="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+      <label class="row">Anthropic API key <input type="password" name="apiKey" autocomplete="off" spellcheck="false" placeholder="optional"></label>
+      <label class="row">Model <input type="text" name="model" autocomplete="off" spellcheck="false"></label>
+      <p class="note">Math lines are sent to Anthropic as images when a key is set. The key stays in this browser.</p>
+      <button class="tb" type="submit">Done</button>
     </form>
   </dialog>
-
-  <script type="module" src="js/app.js"></script>
+  <div id="toasts" aria-live="polite"></div>
+</div>
+<script type="module" src="js/main.js"></script>
 </body>
 </html>

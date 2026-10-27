@@ -1,168 +1,156 @@
-"""Trains the handwriting classifier used by Math mode.
+"""Train the symbol CNN:  python scripts/train/train.py <dataDir>
 
-Data: MNIST digits (real handwriting from ~500 writers) + synthetic, heavily
-distorted renders of every class from scripts/train/gen-synth.mjs.
-Output: models/math-cnn.bin (int8 weights) and models/math-cnn.json (layout).
-
-  python -m venv venv && venv/bin/pip install "jax[cpu]" optax numpy
-  node scripts/train/gen-synth.mjs data 5000 1500
-  curl -o data/mnist.npz https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz
-  venv/bin/python scripts/train/train.py data
+<dataDir> holds mnist.npz, norm-js.f32 (from `gen.mjs --dump-normalize <dataDir>`) and x.u8, y.u8, classes.json
+(from `gen.mjs <dataDir> 1500`). Writes models/cnn.json, models/cnn.bin (format: header of js/recog/cnn.js)
+and tests/fixtures/cnn-parity.json (inputs plus PyTorch logits, checked against cnn.js by tests/model.test.js).
 """
-import json, os, sys, time
+import copy
+import json
+import math
+import sys
+import time
+from pathlib import Path
+
 import numpy as np
-import jax, jax.numpy as jnp, optax
-from PIL import Image
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-DATA = sys.argv[1]
-ROOT = os.path.join(os.path.dirname(__file__), '..', '..')
-CLASSES = json.load(open(os.path.join(os.path.dirname(__file__), 'classes.json'))) + ['∅']
-K = len(CLASSES)
-REJECT = K - 1  # "not a single character": fragments and joined-up pairs
+N, FIT, PAD = 28, 20, 48
+K = [math.exp(-2 / 0.72), math.exp(-1 / 0.72), 1.0]  # blur weights: corner, edge, centre (as raster.js)
+NORM = K[0] * 4 + K[1] * 4 + 1
+EPOCHS, BATCH = 12, 256
+HIDDEN = 96  # not the spec's 128: 1568x128 int8 weights alone would break the 200 KB model cap
+# Sampling is class-balanced, then digits x2: a calculator, digits matter most (MNIST-500 96.4% -> 97.0%).
+# Tried and dropped: REJECT x1.5 plus a rotated/scaled MNIST copy (held-out synthetic fell below 95%, more false REJECTs).
+DIGIT_WEIGHT = 2.0
 
-sx = np.fromfile(f'{DATA}/synth-x.u8', dtype=np.uint8).reshape(-1, 28, 28)
-sy = np.fromfile(f'{DATA}/synth-y.u8', dtype=np.uint8).astype(np.int32)
-m = np.load(f'{DATA}/mnist.npz')
 
-def refit(img):
-    # MNIST-style framing: fit the ink into 20×20 keeping aspect, centre by mass.
-    ys, xs = np.nonzero(img > 20)
-    if len(xs) == 0: return None
-    crop = img[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-    h, w = crop.shape
-    k = 20 / max(h, w)
-    nh, nw = max(1, round(h * k)), max(1, round(w * k))
-    small = np.asarray(Image.fromarray(crop.astype(np.uint8)).resize((nw, nh), Image.BILINEAR))
-    out = np.zeros((28, 28), np.float32)
-    oy, ox = (28 - nh) // 2, (28 - nw) // 2
-    out[oy:oy + nh, ox:ox + nw] = small
-    tot = out.sum()
-    cy, cx = (out.sum(1) * np.arange(28)).sum() / tot, (out.sum(0) * np.arange(28)).sum() / tot
-    return np.roll(out, (int(round(13.5 - cy)), int(round(13.5 - cx))), axis=(0, 1))
+def bilinear(img, u, v):
+    """Sample (B,28,28) img at (B,h,w) coords u (x) and v (y), zero outside: raster.js's bilinear `at`."""
+    pad = np.zeros((img.shape[0], N + 2 * PAD, N + 2 * PAD))
+    pad[:, PAD:PAD + N, PAD:PAD + N] = img
+    fx, fy = np.floor(u), np.floor(v)
+    ax, ay = u - fx, v - fy
+    ix, iy, b = fx.astype(int) + PAD, fy.astype(int) + PAD, np.arange(img.shape[0])[:, None, None]
+    g = lambda dy, dx: pad[b, iy + dy, ix + dx]
+    return (g(0, 0) * (1 - ax) + g(0, 1) * ax) * (1 - ay) + (g(1, 0) * (1 - ax) + g(1, 1) * ax) * ay
 
-def make_reject(pool, n, rng):
-    out = []
-    while len(out) < n:
-        kind = rng.random()
-        a = pool[rng.integers(len(pool))].astype(np.float32)
-        if kind < 0.45:   # two characters written together
-            b = pool[rng.integers(len(pool))].astype(np.float32)
-            ov = rng.integers(0, 12)
-            canvas = np.zeros((28, 56 - ov), np.float32)
-            canvas[:, :28] = a
-            dy = rng.integers(-4, 5)
-            canvas[:, 28 - ov:] = np.maximum(canvas[:, 28 - ov:], np.roll(b, dy, axis=0))
-            img = refit(canvas)
-        else:             # a slice of a character (what a bad cut produces)
-            ys, xs = np.nonzero(a > 20)
-            if len(xs) == 0: continue
-            x0, x1 = xs.min(), xs.max()
-            w = x1 - x0
-            if w < 10: continue
-            cut = x0 + int(w * rng.uniform(0.3, 0.7))
-            part = a.copy()
-            if rng.random() < 0.5: part[:, cut:] = 0
-            else: part[:, :cut] = 0
-            # keep only slices that clearly lost a chunk of ink
-            if part.sum() > 0.8 * a.sum() or part.sum() < 0.2 * a.sum(): continue
-            img = refit(part)
-        if img is not None: out.append(img)
-    return np.stack(out)
-rng = np.random.default_rng(0)
-digit_like = np.concatenate([m['x_train'][:30000], sx[sy < 20]])  # digits and operators
-rej = make_reject(digit_like, 16000, rng)
-print('reject samples', rej.shape)
-X = np.concatenate([m['x_train'].astype(np.float32), sx.astype(np.float32), rej])[..., None] / 255.0
-Y = np.concatenate([m['y_train'].astype(np.int32), sy, np.full(len(rej), REJECT, np.int32)])
-Xt = m['x_test'].astype(np.float32)[..., None] / 255.0
-Yt = m['y_test'].astype(np.int32)
-perm = rng.permutation(len(sx))
-hold = perm[:5000]
-Xs_hold, Ys_hold = sx[hold].astype(np.float32)[..., None] / 255.0, sy[hold]
-print('train', X.shape, 'classes', K)
 
-def init(key):
-    ks = jax.random.split(key, 4)
-    he = lambda k, shape, fan: jax.random.normal(k, shape) * np.sqrt(2.0 / fan)
-    return {
-        'c1': he(ks[0], (5, 5, 1, 16), 25), 'b1': jnp.zeros(16),
-        'c2': he(ks[1], (5, 5, 16, 32), 400), 'b2': jnp.zeros(32),
-        'f1': he(ks[2], (512, 128), 512), 'g1': jnp.zeros(128),
-        'f2': he(ks[3], (128, K), 128), 'g2': jnp.zeros(K),
-    }
+def finish(img):
+    """raster.js finish(): shift centre of mass to (14,14), 3x3 blur, clamp to 1."""
+    ys, xs = np.mgrid[0:N, 0:N]
+    m = img.sum((1, 2))
+    safe = np.where(m > 0, m, 1)
+    sx = np.where(m > 0, 14 - (img * xs).sum((1, 2)) / safe, 0)[:, None, None]
+    sy = np.where(m > 0, 14 - (img * ys).sum((1, 2)) / safe, 0)[:, None, None]
+    gx, gy = np.meshgrid(np.arange(-1, N + 1), np.arange(-1, N + 1))
+    s = bilinear(img, gx[None] - sx, gy[None] - sy)  # at(x, y) for x, y in -1..28
+    v = s[:, 1:-1, 1:-1].copy()
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dx or dy:
+                v += K[2 - abs(dx) - abs(dy)] * s[:, 1 + dy:1 + dy + N, 1 + dx:1 + dx + N]
+    return np.minimum(1, v / NORM).astype(np.float32)
 
-def conv(x, w):
-    return jax.lax.conv_general_dilated(x, w, (1, 1), 'VALID', dimension_numbers=('NHWC', 'HWIO', 'NHWC'))
 
-def pool(x):
-    return jax.lax.reduce_window(x, -jnp.inf, jax.lax.max, (1, 2, 2, 1), (1, 2, 2, 1), 'VALID')
+def normalize(bmp):
+    """NumPy port of raster.js normalizeBitmap for a (B,28,28) float32 batch in 0..1."""
+    ink = bmp > 0.5
+    rows, cols = ink.any(2), ink.any(1)
+    y0, y1 = rows.argmax(1), N - 1 - rows[:, ::-1].argmax(1)
+    x0, x1 = cols.argmax(1), N - 1 - cols[:, ::-1].argmax(1)
+    s = (FIT / np.maximum(x1 - x0 + 1, y1 - y0 + 1))[:, None, None]
+    gx, gy = np.meshgrid(np.arange(N), np.arange(N))
+    u, v = ((x0 + x1) / 2)[:, None, None] + (gx - 14) / s, ((y0 + y1) / 2)[:, None, None] + (gy - 14) / s
+    out = finish(bilinear(bmp.astype(np.float64), u, v).astype(np.float32).astype(np.float64))
+    out[~rows.any(1)] = 0
+    return out
 
-def forward(p, x, drop_key=None):
-    x = pool(jax.nn.relu(conv(x, p['c1']) + p['b1']))   # 24 → 12
-    x = pool(jax.nn.relu(conv(x, p['c2']) + p['b2']))   # 8 → 4
-    x = x.reshape(x.shape[0], -1)                        # 4·4·32 = 512 (HWC order)
-    x = jax.nn.relu(x @ p['f1'] + p['g1'])
-    if drop_key is not None:
-        keep = jax.random.bernoulli(drop_key, 0.7, x.shape)
-        x = jnp.where(keep, x / 0.7, 0)
-    return x @ p['f2'] + p['g2']
 
-def loss_fn(p, x, y, key):
-    logits = forward(p, x, key)
-    return optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
+def mnist_norm(x):
+    return np.concatenate([normalize((x[i:i + 5000] / 255).astype(np.float32)) for i in range(0, len(x), 5000)])
 
-def augment(x, key):
-    # random shifts up to ±2 px and random thickening/thinning
-    k1, k2, k3 = jax.random.split(key, 3)
-    dx, dy = jax.random.randint(k1, (2,), -2, 3)
-    x = jnp.roll(x, (dy, dx), axis=(1, 2))
-    gamma = jax.random.uniform(k2, (x.shape[0], 1, 1, 1), minval=0.6, maxval=1.5)
-    x = jnp.clip(x, 0, 1) ** gamma
-    noise = jax.random.uniform(k3, x.shape) < 0.002
-    return jnp.where(noise, 1.0, x)
 
-steps_per_epoch = len(X) // 256
-EPOCHS = 8
-sched = optax.cosine_decay_schedule(2e-3, EPOCHS * steps_per_epoch)
-opt = optax.adam(sched)
-params = init(jax.random.PRNGKey(0))
-state = opt.init(params)
+def export(net, classes, root):
+    layers, chunks, off = [], [], 0
+    qnet = copy.deepcopy(net)
+    for m, qm in zip(net, qnet):
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            w = m.weight.detach().double()
+            scale = w.abs().max().item() / 127  # per-tensor symmetric int8
+            q = torch.round(w / scale).clamp(-127, 127)
+            qm.weight.data = (q * scale).float()  # what cnn.js reconstructs
+            layers.append({'type': 'conv' if isinstance(m, nn.Conv2d) else 'dense', 'shape': list(w.shape),
+                           'scale': scale, 'offset': off, 'bias': m.bias.detach().tolist()})
+            chunks.append(q.to(torch.int8).numpy().ravel())
+            off += chunks[-1].size
+        else:
+            layers.append({'type': {nn.ReLU: 'relu', nn.MaxPool2d: 'maxpool', nn.Flatten: 'flatten'}[type(m)]})
+    (root / 'models').mkdir(exist_ok=True)
+    (root / 'models/cnn.json').write_text(json.dumps({'classes': classes, 'layers': layers}, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+    np.concatenate(chunks).tofile(root / 'models/cnn.bin')
+    return qnet
 
-@jax.jit
-def step(p, s, x, y, key):
-    ka, kd = jax.random.split(key)
-    l, g = jax.value_and_grad(loss_fn)(p, augment(x, ka), y, kd)
-    u, s = opt.update(g, s, p)
-    return optax.apply_updates(p, u), s, l
 
-@jax.jit
-def predict(p, x):
-    return jnp.argmax(forward(p, x), -1)
+def accuracy(net, x, y):
+    with torch.no_grad():
+        return (torch.cat([net(x[i:i + 2000]).argmax(1) for i in range(0, len(x), 2000)]) == y).float().mean().item()
 
-def accuracy(p, x, y):
-    out = np.concatenate([np.asarray(predict(p, x[i:i + 2000])) for i in range(0, len(x), 2000)])
-    return (out == y).mean()
 
-key = jax.random.PRNGKey(1)
-for ep in range(EPOCHS):
-    t = time.time()
-    order = rng.permutation(len(X))
-    for i in range(steps_per_epoch):
-        idx = order[i * 256:(i + 1) * 256]
-        key, sub = jax.random.split(key)
-        params, state, l = step(params, state, X[idx], Y[idx], sub)
-    print(f'epoch {ep + 1}: loss {float(l):.3f}  mnist-test {accuracy(params, Xt, Yt):.4f}  synth {accuracy(params, Xs_hold, Ys_hold):.4f}  ({time.time() - t:.0f}s)', flush=True)
+def main():
+    t0 = time.time()
+    data, root = Path(sys.argv[1]), Path(__file__).resolve().parents[2]
+    classes = json.loads((data / 'classes.json').read_text(encoding='utf-8'))
+    mn = np.load(data / 'mnist.npz')
 
-# Export: int8 per-tensor quantisation, little-endian, tensors in a fixed order.
-order = ['c1', 'b1', 'c2', 'b2', 'f1', 'g1', 'f2', 'g2']
-blob, layout = bytearray(), []
-for name in order:
-    a = np.asarray(params[name], dtype=np.float32)
-    scale = float(np.abs(a).max() / 127) or 1.0
-    q = np.clip(np.round(a / scale), -127, 127).astype(np.int8)
-    layout.append({'name': name, 'shape': list(a.shape), 'scale': scale, 'offset': len(blob)})
-    blob += q.tobytes()
-os.makedirs(os.path.join(ROOT, 'models'), exist_ok=True)
-open(os.path.join(ROOT, 'models', 'math-cnn.bin'), 'wb').write(bytes(blob))
-json.dump({'classes': CLASSES, 'tensors': layout, 'input': [28, 28, 1]}, open(os.path.join(ROOT, 'models', 'math-cnn.json'), 'w'), indent=1)
-print('saved', len(blob), 'bytes')
+    js = np.fromfile(data / 'norm-js.f32', np.float32).reshape(-1, N, N)
+    err = np.abs(normalize((mn['x_test'][:len(js)] / 255).astype(np.float32)) - js).max()
+    print(f'normalizeBitmap parity on {len(js)} MNIST samples: max |numpy - js| = {err:.2e}')
+    if not err < 1e-4:
+        sys.exit('parity check failed')
+
+    xm, xt = mnist_norm(mn['x_train']), mnist_norm(mn['x_test'])
+    xs = np.fromfile(data / 'x.u8', np.uint8).reshape(-1, N, N)
+    ys = np.fromfile(data / 'y.u8', np.uint8)
+    X = torch.from_numpy(np.concatenate([xm, xs.astype(np.float32) / 255]))[:, None]
+    Y = torch.from_numpy(np.concatenate([mn['y_train'], ys]).astype(np.int64))  # MNIST labels 0-9 = class indices 0-9
+    Xt, Yt = torch.from_numpy(xt)[:, None], torch.from_numpy(mn['y_test'].astype(np.int64))
+    print(f'{len(xm)} MNIST + {len(xs)} synthetic samples, {len(classes)} classes ({time.time() - t0:.0f}s)')
+
+    torch.manual_seed(0)
+    net = nn.Sequential(nn.Conv2d(1, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                        nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                        nn.Flatten(), nn.Linear(32 * 7 * 7, HIDDEN), nn.ReLU(), nn.Linear(HIDDEN, len(classes)))
+    weights = 1.0 / torch.bincount(Y, minlength=len(classes)).float()[Y]  # class-balanced sampling...
+    weights[Y < 10] *= DIGIT_WEIGHT  # ...then reweighted, see DIGIT_WEIGHT
+    steps = len(Y) // BATCH
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, EPOCHS * steps)
+    for ep in range(EPOCHS):
+        net.train()
+        idx = torch.multinomial(weights, len(Y), replacement=True)
+        for k in range(steps):
+            b = idx[k * BATCH:(k + 1) * BATCH]
+            loss = F.cross_entropy(net(X[b]), Y[b])
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            sched.step()
+        net.eval()
+        print(f'epoch {ep + 1}: loss {loss.item():.3f}, MNIST test {accuracy(net, Xt, Yt):.4f} ({time.time() - t0:.0f}s)')
+
+    qnet = export(net, classes, root)
+    print(f'int8 model: MNIST test {accuracy(qnet, Xt, Yt):.4f}, {(root / "models/cnn.bin").stat().st_size} bytes bin')
+
+    # Parity fixture: u8 inputs exactly as cnn.js sees them (v / 255), with float and int8-dequantised logits.
+    px = np.concatenate([np.round(xt[:3] * 255), xs[::len(xs) // 3][:3]]).astype(np.uint8).reshape(-1, N * N)
+    inp = torch.from_numpy((px.astype(np.float64) / 255).astype(np.float32)).reshape(-1, 1, N, N)
+    with torch.no_grad():
+        fixture = {'x': px.tolist(), 'float': net(inp).tolist(), 'quant': qnet(inp).tolist()}
+    (root / 'tests/fixtures/cnn-parity.json').write_text(json.dumps(fixture), encoding='utf-8')
+    print(f'done in {time.time() - t0:.0f}s')
+
+
+if __name__ == '__main__':
+    main()

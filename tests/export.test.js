@@ -1,42 +1,36 @@
-import { test } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPdf } from '../js/export.js';
-import { writeText } from '../js/handwriting.js';
-import { encodeStroke, decodeStroke } from '../js/storage.js';
+import { buildPDF, inkBox } from '../js/notes/export.js';
 
-test('PDF writer produces a well-formed file with a correct xref table', () => {
-  const fakeJpeg = new Uint8Array([0xff, 0xd8, 1, 2, 3, 0xff, 0xd9]);
-  const pdf = buildPdf(fakeJpeg, 10, 20, 7.5, 15);
-  const text = Buffer.from(pdf).toString('latin1');
-  assert.ok(text.startsWith('%PDF-1.4'));
-  assert.ok(text.trimEnd().endsWith('%%EOF'));
-  const startxref = parseInt(text.match(/startxref\n(\d+)/)[1], 10);
-  assert.equal(text.slice(startxref, startxref + 4), 'xref');
-  const offsets = [...text.matchAll(/^(\d{10}) 00000 n $/gm)].map((m) => parseInt(m[1], 10));
-  offsets.forEach((o, i) => assert.equal(text.slice(o, o + `${i + 1} 0 obj`.length), `${i + 1} 0 obj`));
+const text = (u8) => Buffer.from(u8).toString('latin1');
+const paths = [
+  { pts: [[0, 0], [10, 0], [10, 10]], color: '#ff0000' },
+  { pts: [[1, 1], [5, 1], [5, 5]], color: '#000000', alpha: 0.35 },
+];
+
+test('PDF starts with %PDF-, xref offsets correct, contains path ops', () => {
+  const u8 = buildPDF(paths, { w: 100, h: 50 }), s = text(u8);
+  assert.ok(s.startsWith('%PDF-1.'));
+  assert.ok(s.trimEnd().endsWith('%%EOF'));
+  const start = Number(/startxref\n(\d+)\n%%EOF/.exec(s)[1]);
+  assert.ok(s.slice(start).startsWith('xref'));
+  const rows = s.slice(start).split('\n').filter((l) => /^\d{10} \d{5} n/.test(l));
+  assert.ok(rows.length === 4);
+  rows.forEach((r, i) => assert.ok(s.slice(Number(r.slice(0, 10))).startsWith(`${i + 1} 0 obj`), `object ${i + 1}`));
+  assert.match(s, /\/MediaBox \[0 0 100 50\]/);
+  assert.match(s, /1 0 0 rg/);
+  assert.match(s, / m\n/); assert.match(s, / l\n/); assert.match(s, /\nf\n/);
+  const len = Number(/\/Length (\d+)/.exec(s)[1]);
+  const body = s.slice(s.indexOf('stream\n') + 7);
+  assert.equal(body.indexOf('\nendstream'), len);
 });
 
-test('answers are written as handwriting strokes, deterministically', () => {
-  const a = writeText('42.5', { x: 0, baseline: 100, capH: 40, seed: 3 });
-  const b = writeText('42.5', { x: 0, baseline: 100, capH: 40, seed: 3 });
-  assert.ok(a.strokes.length >= 4);
-  assert.deepEqual(a.strokes, b.strokes);
-  assert.ok(a.width > 40);
-  const ys = a.strokes.flat().map((p) => p.y);
-  assert.ok(Math.max(...ys) <= 104 && Math.min(...ys) >= 55, 'sits on the baseline at cap height');
+test('an empty page is still a valid PDF', () => {
+  assert.ok(text(buildPDF([], { w: 10, h: 10 })).startsWith('%PDF-'));
 });
 
-test('uses the writer’s own digit samples when available', () => {
-  const sample = [[{ x: 0, y: 0 }, { x: 0.5, y: -1 }, { x: 0.5, y: 0 }]];
-  const out = writeText('7', { x: 0, baseline: 100, capH: 40, seed: 1, samples: { 7: [sample] } });
-  assert.equal(out.strokes.length, 1);
-  assert.ok(out.strokes[0].length >= 3);
-});
-
-test('stroke encoding round-trips', () => {
-  const s = { id: 'x', color: 'ink', width: 3, tool: 'pen', shape: 'circle', beautified: true, points: [{ x: 1.23, y: 4.56, p: 0.5 }] };
-  const d = decodeStroke(JSON.parse(JSON.stringify(encodeStroke(s))));
-  assert.equal(d.shape, 'circle');
-  assert.equal(d.beautified, true);
-  assert.equal(d.points[0].x, 1.2);
+test('inkBox pads strokes by width and margin', () => {
+  const b = inkBox([{ pts: [[10, 20, 0.5], [30, 60, 0.5]], width: 4 }]);
+  assert.ok(b.x < 8 && b.y < 18 && b.x + b.w > 32 && b.y + b.h > 62);
+  assert.equal(inkBox([]), null);
 });

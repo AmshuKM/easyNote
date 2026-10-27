@@ -11,16 +11,35 @@ concurrency:
   group: pages
   cancel-in-progress: true
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # node --test globs need 21+
+          cache: npm
+      - run: npm ci
+      - run: npm test
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: old-version
+          path: old-src
       - uses: actions/configure-pages@v5
+      # the site files only: no tests, docs, scripts or dev tooling; the previous app is served at /old/
+      - run: |
+          mkdir _site && cp -r index.html manifest.webmanifest css js models vendor assets README.md _site/
+          mkdir _site/old && (cd old-src && cp -r index.html manifest.webmanifest css js models vendor assets ../_site/old/)
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@v4

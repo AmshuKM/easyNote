@@ -1,0 +1,14 @@
+{
+ "note": "Live pen strokes from the user's Chrome test (tests/fixtures/user-live-2026-10-26.json), test data only, never trained on. bbox [x, y, w, h] in fixture px, measured from the strokes with a 10 px margin. The scribble's text is a stand-in (it is not writing); only its result (text) matters.",
+ "lines": [
+  { "text": "24×5=", "expect": 120, "bbox": [319, 114, 243, 82] },
+  { "text": "y=2x+3", "expect": "graph", "bbox": [328, 234, 333, 166] },
+  { "text": "y=2x+3", "expect": "graph", "bbox": [756, 221, 218, 128] },
+  { "text": "y=x^(3)", "expect": "graph", "bbox": [375, 441, 182, 153] },
+  { "text": "y=2x+1", "expect": "graph", "bbox": [862, 481, 230, 110] },
+  { "text": "y=x^(2)", "expect": "graph", "bbox": [418, 579, 170, 148] },
+  { "text": "4+4=", "expect": 8, "bbox": [808, 614, 239, 86] },
+  { "text": "Website", "expect": "text", "bbox": [1476, 10, 261, 81] },
+  { "text": "ss", "expect": "text", "bbox": [10, 328, 130, 166] }
+ ]
+}
